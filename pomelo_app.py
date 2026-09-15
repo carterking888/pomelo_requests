@@ -113,6 +113,13 @@ IS_MAC = sys.platform == "darwin"
 # allure 命令行文件名:Windows 是 allure.bat,类 Unix 是无扩展名的 shell 脚本
 _ALLURE_BIN_NAMES = (("allure.bat", "allure.cmd", "allure.exe") if IS_WIN
                      else ("allure", "allure.sh"))
+# 便携依赖(tools/)相对「可执行文件所在目录」的候选位置:
+#   - "tools"               Windows 就直接同级;macOS 源码态/旧布局也是它
+#   - "../Resources/tools"  macOS 打包态 —— .app 里 tools 放在资源区,
+#     因为 Contents/MacOS/ 下的**任何**文件都会被 codesign 当成需要签名的
+#     代码对象(JRE 里权限 644 的纯文本 release 也不例外),放进去签不过。
+_TOOLS_DIRS = (("tools",) if not IS_MAC
+               else ("tools", os.path.join("..", "Resources", "tools")))
 
 
 def _open_path(target: str) -> None:
@@ -1779,23 +1786,25 @@ class JsApi:
         查找顺序:
         1. 程序目录(打包后 exe/.app 同级)tools/allure-commandline/bin/ 下的
            便携版 —— 目标电脑无需安装 allure、无需配 PATH,解压到包旁边即可;
+           macOS 的 .app 里 tools 在 Contents/Resources/ 下,见 _TOOLS_DIRS;
         2. 系统 PATH(开发机常规安装)。
 
         平台差异只在文件名:Windows 是 allure.bat/.cmd/.exe,macOS 是无扩展名
         的 shell 脚本 allure。见 _ALLURE_BIN_NAMES。
         """
         # 便携根目录:frozen 时取可执行文件所在目录(macOS 的 .app 里就是
-        # Contents/MacOS,与 tools/ 同级);源码态取项目根。
+        # Contents/MacOS);源码态取项目根。
         roots = []
         if getattr(sys, "frozen", False):
             roots.append(os.path.dirname(sys.executable))
         roots.append(os.path.dirname(os.path.abspath(__file__)))
         for root in roots:
-            for cand in _ALLURE_BIN_NAMES:
-                p = os.path.join(root, "tools", "allure-commandline",
-                                 "bin", cand)
-                if os.path.isfile(p):
-                    return p
+            for sub in _TOOLS_DIRS:
+                for cand in _ALLURE_BIN_NAMES:
+                    p = os.path.join(root, sub, "allure-commandline",
+                                     "bin", cand)
+                    if os.path.isfile(p):
+                        return p
         for cand in _ALLURE_BIN_NAMES:
             cli = shutil.which(cand)
             if cli:
@@ -1816,6 +1825,7 @@ class JsApi:
         allure 命令行本质是 Java 程序,启动脚本先找 JAVA_HOME 再找 PATH 里的
         java。目标电脑什么都没装时,只要打包目录带一份 tools/jre,这里把它
         注入子进程环境即可全自包含。找不到返回 ""(回落系统 Java)。
+        macOS 的 .app 里 tools 在 Contents/Resources/ 下,见 _TOOLS_DIRS。
 
         两种目录结构都要认 —— 返回的必须是真正的 JAVA_HOME:
         - Windows:<jre>/bin/java.exe
@@ -1828,11 +1838,13 @@ class JsApi:
             roots.append(os.path.dirname(sys.executable))
         roots.append(os.path.dirname(os.path.abspath(__file__)))
         for root in roots:
-            base = os.path.join(root, "tools", "jre")
-            for home in (os.path.join(base, "Contents", "Home"), base):
-                if (os.path.isfile(os.path.join(home, "bin", "java"))
-                        or os.path.isfile(os.path.join(home, "bin", "java.exe"))):
-                    return home
+            for sub in _TOOLS_DIRS:
+                base = os.path.join(root, sub, "jre")
+                for home in (os.path.join(base, "Contents", "Home"), base):
+                    if (os.path.isfile(os.path.join(home, "bin", "java"))
+                            or os.path.isfile(
+                                os.path.join(home, "bin", "java.exe"))):
+                        return home
         return ""
 
     def _allure_generate(self, report_no: str = "") -> dict:

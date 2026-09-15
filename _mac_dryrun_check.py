@@ -147,6 +147,11 @@ def check_pyd_pack(mod):
           mod.DIST)
     check("APP_PATH 是 .app",
           mod.APP_PATH.replace("\\", "/").endswith("PomeloTool.app"), mod.APP_PATH)
+    # 便携依赖绝不能落在 Contents/MacOS:codesign 把该目录当「可执行代码专区」,
+    # 里面任何文件(哪怕 644 的纯文本)都会被要求签名,外层签名直接失败。
+    check("TOOLS_REL 指向 Contents/Resources/tools",
+          mod.TOOLS_REL.replace("\\", "/") == "Contents/Resources/tools",
+          mod.TOOLS_REL)
     check("allure 候选名是无扩展名脚本",
           "allure" in mod.ALLURE_BIN_NAMES
           and not any(n.endswith(".bat") for n in mod.ALLURE_BIN_NAMES),
@@ -259,10 +264,10 @@ def check_sign_order(mod):
             fh.write(_MACHO)
 
     macho(os.path.join(macos, "PomeloTool"))                      # 主可执行
-    macho(os.path.join(macos, "tools", "jre", "Contents", "Home",
-                       "bin", "java"))                            # JRE(应跳过)
-    macho(os.path.join(macos, "tools", "allure-commandline",
-                       "lib", "x.dylib"))                         # allure 库
+    macho(os.path.join(app, "Contents", "Resources", "tools",
+                       "jre", "Contents", "Home", "bin", "java"))   # JRE(应跳过)
+    macho(os.path.join(app, "Contents", "Resources", "tools",
+                       "allure-commandline", "lib", "x.dylib"))     # allure 库
     macho(os.path.join(fwver, "Python"))                          # 无扩展名!
     macho(os.path.join(fwver, "lib-dynload", "foo.cpython-312-darwin.so"))
     with open(os.path.join(app, "Contents", "Info.plist"), "w") as fh:
@@ -413,6 +418,40 @@ def check_build_script():
           "--check-deps" in s)
     check("按架构选 JRE(aarch64/x64)", "aarch64" in s and "x64" in s)
     check("说明需要 xattr -cr", "xattr -cr" in s)
+    check("生成 dmg(hdiutil + 压缩镜像)",
+          "hdiutil create" in s and "UDZO" in s)
+    check("dmg 里有 Applications 软链(拖拽落点)", "ln -s /Applications" in s)
+    check("便携依赖校验落在 Resources 而非 MacOS",
+          "Contents/Resources/tools" in s and '-e "$MACOS_DIR/tools"' in s)
+
+
+# ============================================================
+#  5. pomelo_app.py:便携依赖的查找路径
+# ============================================================
+def check_runtime_tools_path():
+    """打包位置改了,运行时查找必须跟着改,否则「带是带了、找不到」。
+
+    直接 exec 那句赋值(它依赖 IS_MAC),两种平台各验一次 —— 单向断言容易
+    写成「两边都加了候选」这种假绿。
+    """
+    print("\n[5] pomelo_app.py:便携依赖查找路径")
+    path = os.path.join(ROOT, "pomelo_app.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    node = next((n for n in tree.body
+                 if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "_TOOLS_DIRS"
+                         for t in n.targets)), None)
+    if node is None:
+        check("从 pomelo_app.py 抠出 _TOOLS_DIRS", False, "未找到")
+        return
+    check("从 pomelo_app.py 抠出 _TOOLS_DIRS", True)
+    for is_mac, want in ((True, True), (False, False)):
+        ns = {"IS_MAC": is_mac, "os": os}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "<t>", "exec"), ns)
+        dirs = ns["_TOOLS_DIRS"]
+        got = any("Resources" in d for d in dirs)
+        check("mac=%-5s 时%s Resources/tools 候选" % (is_mac, "含" if want else "不含"),
+              got == want, dirs)
 
 
 def main():
@@ -426,6 +465,7 @@ def main():
     check_sign_order(pp)
     check_setup_clang_env()
     check_build_script()
+    check_runtime_tools_path()
 
     print("\n" + "=" * 66)
     if FAILS:

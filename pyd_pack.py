@@ -51,6 +51,17 @@ APP_PATH = os.path.join("dist", APP_NAME + ".app") if IS_MAC else DIST
 # 打包其实成功了,是校验找错了地方。所以校验一律以整个 .app 为根。
 SEARCH_ROOT = APP_PATH if IS_MAC else DIST
 
+# ---- 便携依赖(allure / jre)在包内的位置 ----
+# ⚠ macOS 上**绝不能放 Contents/MacOS/**。
+# codesign 把该目录当作「可执行代码专区」:里面任何文件 —— 哪怕权限是 644
+# 的纯文本(比如 JRE 的 `release`)—— 都会被要求是**已签名的代码对象**,
+# 于是签外层时报 `code object is not signed at all`
+# + `In subcomponent: .../Contents/Home/release`,整个打包失败。
+# 放到 bundle 的资源区 Contents/Resources/ 就只当普通资源看待。
+# (Android Studio 把自带 JBR 放在 Contents/jbr,同理。)
+TOOLS_REL = (os.path.join("Contents", "Resources", "tools") if IS_MAC
+             else "tools")
+
 # ---- portable runtime to bundle ----
 # Windows 开发机是固定路径;macOS 走 build_mac.sh 下载到的 build_tools/;
 # CI 两种情况都由 ALLURE_SRC / JRE_SRC 环境变量注入(优先级最高)。
@@ -426,8 +437,10 @@ def main():
                 os.rename(src + SRC_SUFFIX, src)
         print("[pyd] restored %d source file(s)" % len(renamed))
 
-    # 5. portable allure + jre next to the executable —— 目标机零安装的前提
-    tools = os.path.join(DIST, "tools")
+    # 5. portable allure + jre —— 目标机零安装的前提
+    #    位置见 TOOLS_REL:mac 必须在 Contents/Resources/(放 MacOS 里会导致
+    #    代码签名失败,原因见常量处的注释)
+    tools = os.path.join(APP_PATH, TOOLS_REL)
     os.makedirs(tools, exist_ok=True)
     allure_dst = os.path.join(tools, "allure-commandline")
     jre_dst = os.path.join(tools, "jre")

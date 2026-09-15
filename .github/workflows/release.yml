@@ -350,8 +350,12 @@ jobs:
           set -euo pipefail
           APP="dist/PomeloTool.app"
           M="$APP/Contents/MacOS"
+          # 便携依赖在资源区。放 Contents/MacOS 里会被 codesign 当成未签名的
+          # 代码对象(JRE 里 644 的纯文本 release 也一样),外层签名直接失败。
+          TD="$APP/Contents/Resources/tools"
           errs=""
           [ -f "$M/PomeloTool" ] || errs="$errs PomeloTool 可执行文件"
+          if [ -e "$M/tools" ]; then errs="$errs tools/误放在Contents/MacOS(签名会失败)"; fi
           # 资源与扩展的位置随 PyInstaller 版本变化(Frameworks / Resources /
           # _internal 都用过),一律在整个 .app 里递归找,不猜目录名 ——
           # 猜错会把「打包成功」误判成「文件缺失」。
@@ -359,8 +363,8 @@ jobs:
           [ -n "$WEB" ] || errs="$errs web 资源"
           BRIDGE="$(find "$APP" -path '*/web/js/bridge.js' -print -quit)"
           [ -n "$BRIDGE" ] || errs="$errs bridge.js(局域网模式的桥)"
-          [ -f "$M/tools/allure-commandline/bin/allure" ] || errs="$errs 便携 allure-commandline"
-          [ -f "$M/tools/jre/Contents/Home/bin/java" ] || errs="$errs 便携 JRE"
+          [ -f "$TD/allure-commandline/bin/allure" ] || errs="$errs 便携 allure-commandline"
+          [ -f "$TD/jre/Contents/Home/bin/java" ] || errs="$errs 便携 JRE"
           # data/ 同样全包找;tools/ 里 JRE/allure 自带的同名目录用 -prune 跳过
           DATA="$(find "$APP" -path '*/tools' -prune -o -type d -name 'data' -print -quit)"
           if [ -n "$DATA" ]; then errs="$errs data/不该入包：$DATA"; fi
@@ -376,7 +380,7 @@ jobs:
           echo "[OK] 核心编译产物：$(basename "$CORE")"
 
           # 便携依赖体积:tools 约 150MB 量级,明显偏小说明拷贝被跳过或残缺
-          T=$(du -sm "$M/tools" | cut -f1)
+          T=$(du -sm "$TD" | cut -f1)
           echo "[OK] tools（便携 allure+jre）: ${T} MB"
           if [ "$T" -lt 100 ]; then echo "::error::tools 只有 ${T}MB,便携依赖不完整"; exit 1; fi
 
@@ -395,13 +399,40 @@ jobs:
           echo "产物：$ZIP (${MB} MB)"
           if [ "$MB" -lt 40 ]; then echo "::error::zip 只有 ${MB}MB,明显不完整"; exit 1; fi
 
+      - name: DMG
+        run: |
+          set -euo pipefail
+          DMG="dist/PomeloTool_v${{ needs.version.outputs.ver }}_macos_${{ matrix.arch }}.dmg"
+          rm -rf build_dmg "$DMG"
+          mkdir -p build_dmg
+          cp -R dist/PomeloTool.app build_dmg/
+          ln -s /Applications build_dmg/Applications   # 拖拽安装的落点
+          # UDZO = 压缩只读镜像
+          hdiutil create -volname "PomeloTool" -srcfolder build_dmg \
+            -ov -format UDZO "$DMG"
+          rm -rf build_dmg
+          MB=$(du -m "$DMG" | cut -f1)
+          echo "产物：$DMG (${MB} MB)"
+          if [ "$MB" -lt 40 ]; then echo "::error::dmg 只有 ${MB}MB,明显不完整"; exit 1; fi
+          # 挂载验证一次:能挂上、且里面有 .app 才算数
+          MP=$(hdiutil attach -nobrowse -readonly "$DMG" | awk -F'\t' '/\/Volumes\//{print $NF; exit}')
+          [ -n "$MP" ] || { echo "::error::dmg 挂载失败"; exit 1; }
+          [ -d "$MP/PomeloTool.app" ] || { echo "::error::dmg 里没有 PomeloTool.app"; hdiutil detach "$MP" || true; exit 1; }
+          # 单独验一次签名 —— 复制进 dmg 的过程不该改变签名
+          codesign --verify --verbose=2 "$MP/PomeloTool.app" \
+            || { echo "::error::dmg 内 .app 签名校验失败"; hdiutil detach "$MP" || true; exit 1; }
+          hdiutil detach "$MP" >/dev/null
+          echo "[OK] dmg 挂载/内容/签名 全部通过"
+
       - name: List dist
         run: ls -lh dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-macos-${{ matrix.arch }}
-          path: dist/PomeloTool_v*_macos_*.zip
+          path: |
+            dist/PomeloTool_v*_macos_*.zip
+            dist/PomeloTool_v*_macos_*.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -427,7 +458,7 @@ jobs:
         run: |
           echo "下载到的产物："
           ls -lh dist || true
-          N=$(ls -1 dist/*.zip 2>/dev/null | wc -l)
+          N=$(ls -1 dist/*.zip dist/*.dmg 2>/dev/null | wc -l)
           [ "$N" -gt 0 ] || { echo "::error::没有任何产物（构建失败），不建 Release"; exit 1; }
 
       - name: Compute tag / title
@@ -444,7 +475,7 @@ jobs:
           {
             echo "## 产物"
             echo ""
-            for f in dist/*.zip; do
+            for f in dist/*.zip dist/*.dmg; do
               [ -f "$f" ] || continue
               echo "- \`$(basename "$f")\`  ($(du -h "$f" | cut -f1))"
             done
@@ -477,15 +508,22 @@ jobs:
 
             ### 使用（macOS）
 
-            - Apple Silicon（M 系列）下载 `*_macos_arm64.zip`
-            - Intel 芯片下载 `*_macos_x86_64.zip`
+            - Apple Silicon（M 系列）下载 `*_macos_arm64.dmg`（或 `.zip`）
+            - Intel 芯片下载 `*_macos_x86_64.dmg`（或 `.zip`）
             - 两种架构**不能混用**，装错了双击会提示「无法打开」
+
+            **推荐 dmg**：双击挂载，把 `PomeloTool` 拖进 `Applications` 即可。
+
+            用 zip 的话：
 
             ```bash
             unzip -q PomeloTool_v*_macos_*.zip
             xattr -cr PomeloTool.app     # 清掉下载带来的隔离标记，否则会被系统拦下
             open PomeloTool.app
             ```
+
+            首次启动若提示「无法验证开发者」，右键点图标选「打开」放行一次即可
+            （本包为 ad-hoc 签名，未做 Apple 公证）。
 
             命令行也可以直接跑：`PomeloTool.app/Contents/MacOS/PomeloTool`
 
@@ -495,4 +533,6 @@ jobs:
             > 数据在 exe 旁的 `data/` 目录，升级程序不影响数据。
 
             > 用 7-Zip 解压可跳过第 2 步（Windows 自带解压会传播「Web 标记」）。
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.dmg

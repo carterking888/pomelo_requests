@@ -91,9 +91,10 @@
 
 ### macOS
 
-- Apple Silicon（M 系列）用 `*_macos_arm64.zip`，Intel 芯片用 `*_macos_x86_64.zip`，
+- Apple Silicon（M 系列）用 `*_macos_arm64.*`，Intel 芯片用 `*_macos_x86_64.*`，
   两者**不能混用**，装错了双击会提示「无法打开」；
-- 命令行方式（首次用推荐，顺便清掉隔离标记）：
+- **推荐 dmg**：双击挂载，把 `PomeloTool` 拖进 `Applications` 即可；
+- 用 zip 的话，命令行方式最省事（首次用推荐，顺便清掉隔离标记）：
 
 ```bash
 unzip -q PomeloTool_v*_macos_*.zip
@@ -101,6 +102,7 @@ xattr -cr PomeloTool.app
 open PomeloTool.app
 ```
 
+- 首次启动若提示「无法验证开发者」，右键点图标选「打开」放行一次即可（本包未做 Apple 公证）；
 - 也可以直接跑：`PomeloTool.app/Contents/MacOS/PomeloTool`
 
 ### 数据备份 / 迁移
@@ -188,13 +190,28 @@ chmod +x build_mac.sh     # 首次
 ```
 
 流程与 Windows 一致，另外会自动下载对应架构的 Allure 与 Java 运行环境、完成签名，
-最后用 `zip -y` 压缩（`.app` 内部靠符号链接组织，丢了软链解压后无法启动，所以 `-y` 是必须的）。
+最后生成 **zip 与 dmg 两种分发包**（`.app` 内部靠符号链接组织，丢了软链解压后无法启动，
+所以 zip 的 `-y` 是必须的）。
 
-产物：`dist/PomeloTool.app` 与 `PomeloTool_macOS_<日期>.zip`。
+产物：`dist/PomeloTool.app`、`PomeloTool_macOS_<日期>.zip`、`PomeloTool_macOS_<日期>.dmg`。
+
+dmg 挂载后把 `PomeloTool` 拖进 `Applications` 即可，是 mac 用户更习惯的安装方式。
+
+mac 版的目录结构（便携依赖放在**资源区**，不能放 `Contents/MacOS`——那里是代码签名
+的「可执行代码专区」，放进去会导致签名失败）：
+
+```
+dist/PomeloTool.app/Contents/
+├── MacOS/PomeloTool                     # 主程序
+├── Frameworks/                          # 运行库 + 界面资源
+└── Resources/tools/
+    ├── allure-commandline               # Allure 命令行（约 28MB）
+    └── jre/Contents/Home                # 便携 Java 运行环境（约 125MB，非 JDK）
+```
 
 > **打包工具不支持交叉编译**：Windows 上打不出 mac 包，反之亦然。
 > 想一次拿到两端产物，用 `.github/workflows/release.yml` —— 它会同时跑 Windows、
-> macOS arm64、macOS x86_64 三条腿，把三个 zip 挂到同一个 Release 上。
+> macOS arm64、macOS x86_64 三条腿，把各平台产物挂到同一个 Release 上。
 
 ### 便携依赖是打包的硬性要求
 
