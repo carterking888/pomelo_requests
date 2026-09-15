@@ -104,6 +104,32 @@ _EVENT_SUB_LOCK = threading.Lock()
 _REMOTE = threading.local()         # 标记"本次调用来自局域网 HTTP 请求"
 _RPC_BLOCKED = {"pick_save_path"}   # 需要本机桌面交互的方法,远程拒绝
 
+# ---------------- 平台差异(Windows / macOS) ----------------
+# 打包支持 Windows 与 macOS 两端。差异集中在三处:用什么命令打开文件/URL、
+# allure 命令行长什么样、便携 JRE 目录结构 —— 都收敛到这几个变量,别散落各处。
+IS_WIN = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+# allure 命令行文件名:Windows 是 allure.bat,类 Unix 是无扩展名的 shell 脚本
+_ALLURE_BIN_NAMES = (("allure.bat", "allure.cmd", "allure.exe") if IS_WIN
+                     else ("allure", "allure.sh"))
+
+
+def _open_path(target: str) -> None:
+    """用系统默认程序打开文件 / 目录 / URL(跨平台)。
+
+    Windows 用 os.startfile(它没有任何进程级副作用);
+    macOS 用 open(1),其余类 Unix 用 xdg-open。
+    注意 macOS 下不要用 os.startfile —— 该函数在非 Windows 上根本不存在,
+    调用即 AttributeError,而这里正是"点报告/点地址条"的必经路径。
+    """
+    if IS_WIN:
+        os.startfile(target)  # noqa: S606
+        return
+    opener = "open" if IS_MAC else "xdg-open"
+    subprocess.Popen([opener, target],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 
 def _is_remote_call() -> bool:
     """当前调用是否来自局域网 HTTP 请求(而非桌面窗口桥)"""
@@ -1740,7 +1766,7 @@ class JsApi:
             else:
                 return {"ok": False, "error": "还没有 Allure 结果:先执行一次套件"}
         try:
-            os.startfile(out_dir)  # noqa: S606 (Windows 资源管理器)
+            _open_path(out_dir)    # 资源管理器 / Finder
             return {"ok": True, "path": out_dir}
         except Exception as e:
             return {"ok": False, "error": "打开目录失败: " + str(e)}
@@ -1751,27 +1777,33 @@ class JsApi:
         bash 脚本(WinError 193),所以优先找 allure.bat/.cmd,再回落 .exe。
 
         查找顺序:
-        1. 程序目录(打包后 exe 同级)tools/allure-commandline/bin/ 下的便携版
-           —— 目标电脑无需安装 allure、无需配 PATH,解压到 exe 旁即可;
+        1. 程序目录(打包后 exe/.app 同级)tools/allure-commandline/bin/ 下的
+           便携版 —— 目标电脑无需安装 allure、无需配 PATH,解压到包旁边即可;
         2. 系统 PATH(开发机常规安装)。
+
+        平台差异只在文件名:Windows 是 allure.bat/.cmd/.exe,macOS 是无扩展名
+        的 shell 脚本 allure。见 _ALLURE_BIN_NAMES。
         """
+        # 便携根目录:frozen 时取可执行文件所在目录(macOS 的 .app 里就是
+        # Contents/MacOS,与 tools/ 同级);源码态取项目根。
         roots = []
         if getattr(sys, "frozen", False):
             roots.append(os.path.dirname(sys.executable))
         roots.append(os.path.dirname(os.path.abspath(__file__)))
         for root in roots:
-            for cand in ("allure.bat", "allure.cmd", "allure.exe"):
+            for cand in _ALLURE_BIN_NAMES:
                 p = os.path.join(root, "tools", "allure-commandline",
                                  "bin", cand)
                 if os.path.isfile(p):
                     return p
-        for cand in ("allure.bat", "allure.cmd", "allure.exe", "allure"):
+        for cand in _ALLURE_BIN_NAMES:
             cli = shutil.which(cand)
-            if cli and cli.lower().endswith((".bat", ".cmd", ".exe")):
+            if cli:
                 return cli
-        # which 只命中无扩展名脚本时,尝试同级目录补 .bat
+        # Windows 上 which 可能返回无扩展名的 bash 脚本(WinError 193),
+        # 同目录补一个可执行的 .bat/.cmd 再试
         plain = shutil.which("allure")
-        if plain:
+        if plain and IS_WIN:
             for ext in (".bat", ".cmd", ".exe"):
                 if os.path.isfile(plain + ext):
                     return plain + ext
@@ -1781,19 +1813,26 @@ class JsApi:
     def _bundled_jre() -> str:
         """找打包时随身携带的便携 JRE:程序目录(或项目根)tools/jre/。
 
-        allure 命令行本质是 Java 程序,allure.bat 启动时先找 JAVA_HOME
-        再找 PATH 里的 java。目标电脑什么都没装时,只要打包目录带一份
-        tools/jre(含 bin/java.exe),这里把它注入子进程环境即可全自包含。
-        找不到返回 ""(回落系统 Java)。
+        allure 命令行本质是 Java 程序,启动脚本先找 JAVA_HOME 再找 PATH 里的
+        java。目标电脑什么都没装时,只要打包目录带一份 tools/jre,这里把它
+        注入子进程环境即可全自包含。找不到返回 ""(回落系统 Java)。
+
+        两种目录结构都要认 —— 返回的必须是真正的 JAVA_HOME:
+        - Windows:<jre>/bin/java.exe
+        - macOS:  <jre>/Contents/Home/bin/java(OpenJDK 归档解压后多一层
+          Contents/Home,JAVA_HOME 要指到那一层,指 <jre> 本身 java 找不到)
+        也兼容被打平的 <jre>/bin/java。
         """
         roots = []
         if getattr(sys, "frozen", False):
             roots.append(os.path.dirname(sys.executable))
         roots.append(os.path.dirname(os.path.abspath(__file__)))
         for root in roots:
-            jre_bin = os.path.join(root, "tools", "jre", "bin")
-            if os.path.isfile(os.path.join(jre_bin, "java.exe")):
-                return os.path.dirname(jre_bin)
+            base = os.path.join(root, "tools", "jre")
+            for home in (os.path.join(base, "Contents", "Home"), base):
+                if (os.path.isfile(os.path.join(home, "bin", "java"))
+                        or os.path.isfile(os.path.join(home, "bin", "java.exe"))):
+                    return home
         return ""
 
     def _allure_generate(self, report_no: str = "") -> dict:
@@ -1830,7 +1869,9 @@ class JsApi:
             pass  # 历史拷贝失败只影响趋势,不阻塞报告生成
 
         cmd = [cli, "generate", results_dir, "-o", report_dir, "--clean"]
-        if cli.lower().endswith((".bat", ".cmd")):
+        # .bat/.cmd 不是可执行文件,必须经 cmd 解释器;macOS 的 allure 是
+        # 带执行位的 shell 脚本,直接 exec(加 cmd /c 反而会找不到 cmd)
+        if IS_WIN and cli.lower().endswith((".bat", ".cmd")):
             cmd = ["cmd", "/c"] + cmd
         # 便携 JRE:打包目录 tools/jre 存在时注入子进程环境,
         # allure.bat 优先读 JAVA_HOME,从而目标电脑零安装也能生成报告
@@ -1901,7 +1942,7 @@ class JsApi:
         if _MAIN_PORT:
             url = "http://127.0.0.1:%d%s" % (_MAIN_PORT, rel)
             try:
-                os.startfile(url)  # noqa: S606 (默认浏览器打开)
+                _open_path(url)    # 默认浏览器打开
                 return {"ok": True, "path": url}
             except Exception as e:
                 return {"ok": False, "error": "打开浏览器失败: " + str(e) + "(" + url + ")"}
@@ -1916,7 +1957,7 @@ class JsApi:
                if report_no else
                "http://127.0.0.1:%d/index.html" % port)
         try:
-            os.startfile(url)  # noqa: S606 (默认浏览器打开)
+            _open_path(url)        # 默认浏览器打开
             return {"ok": True, "path": url}
         except Exception as e:
             return {"ok": False, "error": "打开浏览器失败: " + str(e) + "(" + url + ")"}
@@ -2147,8 +2188,10 @@ def _window_icon() -> str:
     - 打包态:exe 已通过 spec 的 icon 参数内嵌图标,pywebview winforms 后端
       会自动从 sys.executable 提取,无需显式指定(返回空串);
     - 开发态:python.exe 没有业务图标,显式指向仓库里的 docs/images/icon.ico。
+    - macOS:窗口/Dock 图标来自 .app 内的 icns,build 时由 PyInstaller 处理;
+      运行期传 .ico 没有意义(仅 GTK/QT 后端才认 icon 参数),一律返回空串。
     """
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) or IS_MAC:
         return ""
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "docs", "images", "icon.ico")
@@ -2188,9 +2231,15 @@ def main() -> None:
                 print(f"[局域网] 其他电脑浏览器访问 -> http://{lan_ip}:{port}/index.html")
             else:
                 print(f"[局域网] 其他电脑浏览器访问 -> http://<本机IP>:{port}/index.html")
-            print("[局域网] 首次使用需放行防火墙(管理员 PowerShell 执行一次):")
-            print(f"         netsh advfirewall firewall add rule name=\"PomeloTool {port}\" "
-                  f"dir=in action=allow protocol=TCP localport={port}")
+            if IS_WIN:
+                print("[局域网] 首次使用需放行防火墙(管理员 PowerShell 执行一次):")
+                print(f"         netsh advfirewall firewall add rule name=\"PomeloTool {port}\" "
+                      f"dir=in action=allow protocol=TCP localport={port}")
+            elif IS_MAC:
+                # macOS 应用防火墙按「应用」放行,不是按端口。首次被拦时
+                # 系统设置里会出现是否允许 PomeloTool 接受连接的弹窗。
+                print("[局域网] macOS 若弹出「是否允许 PomeloTool 接受传入网络连接」请选允许;")
+                print("         也可在 系统设置 → 网络 → 防火墙 → 选项 里手动放行。")
             if port != LAN_PORTS[0]:
                 print(f"[提示] 端口 {LAN_PORTS[0]} 被占用,已改用备用端口 {port}")
         else:

@@ -82,6 +82,7 @@ jobs:
           missing=""
           for f in pomelo_tool.spec main.py setup_pyd.py pyd_pack.py \
                    requirements.txt fix_and_check.bat \
+                   build_mac.sh _mac_dryrun_check.py \
                    web/index.html web/js/bridge.js docs/images/icon.ico; do
             [ -f "$f" ] || missing="$missing $f"
           done
@@ -93,6 +94,11 @@ jobs:
             exit 1
           fi
           echo "必需文件就位：spec / 入口 / 打包脚本 / bridge.js / icon.ico"
+
+      # mac 分支只有在 mac runner 上才会真正执行,笔误要等十几分钟才暴露。
+      # 这一步在便宜的 ubuntu 上就把 mac 侧的关键路径先跑一遍(不需要 mac)。
+      - name: mac 分支预检（在 ubuntu 上模拟 darwin）
+        run: python _mac_dryrun_check.py
 
       - name: Resolve version（最新 tag 的 patch +1）
         id: v
@@ -250,9 +256,151 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ---------------------------------------------------------------
+  # macOS:arm64(Apple Silicon)与 x86_64(Intel)必须各出一份 ——
+  # 两种架构互不兼容,arm64 产物在 Intel 机器上双击报「无法打开」。
+  #
+  # PyInstaller 不支持交叉编译,所以 mac 产物只能在 mac runner 上构建;
+  # 这也是本地 Windows 开发机打不出 mac 包的原因。
+  # 矩阵里任一条腿失败不互相牵连(fail-fast: false),publish 用 !cancelled()
+  # 兜底 —— 至少把成功的那份发出去。
+  # ---------------------------------------------------------------
+  macos:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14      # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13      # Intel (x86_64);若该镜像退役改 macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      # runner 上没有开发机的 ~/build_tools,依赖由下面的 Fetch 步骤下载到工作区;
+      # build_mac.sh / pyd_pack.py 都读这两个变量
+      ALLURE_SRC: ${{ github.workspace }}/build_tools/allure-commandline
+      JRE_SRC: ${{ github.workspace }}/build_tools/jre
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Show build source
+        run: |
+          echo "event    : ${{ github.event_name }}"
+          echo "commit   : $(git rev-parse --short HEAD)"
+          echo "runner   : ${{ matrix.runner }} / $(uname -m)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements.txt "cython>=3.0" "pyinstaller>=6.0" setuptools wheel
+
+      # 便携 Allure(unix tgz)+ JRE 17(Adoptium mac 包)。
+      # 注意 mac 的归档结构和 Windows 不同:allure 是无扩展名的 shell 脚本,
+      # JRE 解压后多一层 Contents/Home。
+      - name: Fetch portable Allure + JRE
+        run: |
+          set -euo pipefail
+          mkdir -p build_tools
+          curl -fL --retry 3 -o build_tools/allure.tgz \
+            "https://github.com/allure-framework/allure2/releases/download/${{ env.ALLURE_VER }}/allure-${{ env.ALLURE_VER }}.tgz"
+          mkdir -p build_tools/allure_raw
+          tar -xzf build_tools/allure.tgz -C build_tools/allure_raw
+          mv "build_tools/allure_raw/allure-${{ env.ALLURE_VER }}" "$ALLURE_SRC"
+          chmod +x "$ALLURE_SRC/bin/allure"
+          [ -f "$ALLURE_SRC/bin/allure" ] || { echo "::error::Allure 结构不符合预期"; exit 1; }
+
+          JARCH=${{ matrix.arch == 'arm64' && 'aarch64' || 'x64' }}
+          curl -fL --retry 3 -o build_tools/jre.tar.gz \
+            "https://api.adoptium.net/v3/binary/latest/17/ga/mac/${JARCH}/jre/hotspot/normal/eclipse"
+          mkdir -p build_tools/jre_raw
+          tar -xzf build_tools/jre.tar.gz -C build_tools/jre_raw
+          inner="$(find build_tools/jre_raw -maxdepth 1 -mindepth 1 -type d | head -1)"
+          [ -n "$inner" ] || { echo "::error::JRE 解压后没有顶层目录"; exit 1; }
+          mv "$inner" "$JRE_SRC"
+          [ -f "$JRE_SRC/Contents/Home/bin/java" ] || { echo "::error::JRE 结构不符合预期"; exit 1; }
+          "$JRE_SRC/Contents/Home/bin/java" -version
+
+      # 与本地 build_mac.sh 同一条命令,单一事实来源
+      - name: Check portable deps（与本地 build_mac.sh 同一套校验）
+        run: python pyd_pack.py --check-deps
+
+      # 官方 universal2 的 Python 会默认双架构编译,setup_pyd.py 里
+      # 用 ARCHFLAGS 锁到 runner 自身架构
+      - name: Cython build（pomelo_app.py -> .so）
+        run: python setup_pyd.py build_ext --inplace
+
+      # pyd_pack.py 内部:藏源码 -> PyInstaller(BUNDLE 出 .app)
+      # -> 校验无源码泄露 -> 还原 -> 拷 allure/jre -> ad-hoc 签名
+      - name: PyInstaller pack（只打 .so + 捆绑 allure/jre + 签名）
+        env:
+          POMELO_VERSION: ${{ needs.version.outputs.ver }}
+        run: python pyd_pack.py
+
+      - name: Verify layout
+        run: |
+          set -euo pipefail
+          APP="dist/PomeloTool.app"
+          M="$APP/Contents/MacOS"
+          errs=""
+          [ -f "$M/PomeloTool" ] || errs="$errs PomeloTool 可执行文件"
+          [ -d "$M/_internal/web" ] || [ -d "$M/../Frameworks/web" ] || errs="$errs web 资源"
+          [ -f "$M/_internal/web/js/bridge.js" ] || [ -f "$M/../Frameworks/web/js/bridge.js" ] || errs="$errs bridge.js(局域网模式的桥)"
+          [ -f "$M/tools/allure-commandline/bin/allure" ] || errs="$errs 便携 allure-commandline"
+          [ -f "$M/tools/jre/Contents/Home/bin/java" ] || errs="$errs 便携 JRE"
+          if [ -d "$M/data" ]; then errs="$errs data/不该入包"; fi
+          if [ -n "$errs" ]; then echo "::error::布局校验失败：$errs"; exit 1; fi
+
+          # 源码泄露 / 核心 .so 必须在包里。
+          # 用 find -print -quit 而不是 `find | grep -q` —— 后者命中即退出会给
+          # find 发 SIGPIPE,配合 pipefail 整条管道返回失败,检查会静默失效。
+          LEAK="$(find "$APP" -name 'pomelo_app.py' -print -quit)"
+          if [ -n "$LEAK" ]; then echo "::error::源码泄露进包：$LEAK"; exit 1; fi
+          CORE="$(find "$APP" -name 'pomelo_app.*.so' -print -quit)"
+          if [ -z "$CORE" ]; then echo "::error::核心 pomelo_app.*.so 未打进包"; exit 1; fi
+          echo "[OK] 核心编译产物：$(basename "$CORE")"
+
+          # 便携依赖体积:tools 约 150MB 量级,明显偏小说明拷贝被跳过或残缺
+          T=$(du -sm "$M/tools" | cut -f1)
+          echo "[OK] tools（便携 allure+jre）: ${T} MB"
+          if [ "$T" -lt 100 ]; then echo "::error::tools 只有 ${T}MB,便携依赖不完整"; exit 1; fi
+
+          # ad-hoc 签名是 arm64 能不能启动的前提,验一下
+          codesign --verify --verbose=2 "$APP" || { echo "::error::codesign 校验失败"; exit 1; }
+          echo "[OK] codesign 校验通过（${{ matrix.arch }}）"
+
+      - name: Zip
+        run: |
+          set -euo pipefail
+          ZIP="dist/PomeloTool_v${{ needs.version.outputs.ver }}_macos_${{ matrix.arch }}.zip"
+          rm -f "$ZIP"
+          # -y 必须带:.app 内部靠符号链接组织框架,丢了软链解压后直接起不来
+          ( cd dist && zip -qry "../$ZIP" PomeloTool.app )
+          MB=$(du -m "$ZIP" | cut -f1)
+          echo "产物：$ZIP (${MB} MB)"
+          if [ "$MB" -lt 40 ]; then echo "::error::zip 只有 ${MB}MB,明显不完整"; exit 1; fi
+
+      - name: List dist
+        run: ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-macos-${{ matrix.arch }}
+          path: dist/PomeloTool_v*_macos_*.zip
+          if-no-files-found: error
+          retention-days: 14
+
   # 统一在最后一步建 Release + 挂 assets
   publish:
-    needs: [version, windows]
+    needs: [version, windows, macos]
     # 即使 windows 失败也走进来:这样能明确看到是"构建失败"而不是"压根没触发"
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
@@ -314,11 +462,27 @@ jobs:
             - 🌐 局域网协作：一台机器启动，同网段其他人用浏览器即可访问使用
             - 🔌 端口自动回退：18080 被占用时自动改用 18081，页面右上角显示访问地址
 
-            ### 使用
+            ### 使用（Windows）
 
             1. 解压 `PomeloTool_v*_win64.zip`
             2. **先双击 `fix_and_check.bat`**（解除下载文件的安全标记 + 检查 .NET 版本，需 4.7.2+）
             3. 双击 `PomeloTool.exe`
+
+            ### 使用（macOS）
+
+            - Apple Silicon（M 系列）下载 `*_macos_arm64.zip`
+            - Intel 芯片下载 `*_macos_x86_64.zip`
+            - 两种架构**不能混用**，装错了双击会提示「无法打开」
+
+            ```bash
+            unzip -q PomeloTool_v*_macos_*.zip
+            xattr -cr PomeloTool.app     # 清掉下载带来的隔离标记，否则会被系统拦下
+            open PomeloTool.app
+            ```
+
+            命令行也可以直接跑：`PomeloTool.app/Contents/MacOS/PomeloTool`
+
+            > 全部依赖（含 Java 运行环境与 Allure）都已打进包里，目标机器**不需要装 Java**。
 
             > 局域网访问：首次使用需管理员放行防火墙（启动时控制台会打印对应命令）。
             > 数据在 exe 旁的 `data/` 目录，升级程序不影响数据。
