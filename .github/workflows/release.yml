@@ -352,11 +352,18 @@ jobs:
           M="$APP/Contents/MacOS"
           errs=""
           [ -f "$M/PomeloTool" ] || errs="$errs PomeloTool 可执行文件"
-          [ -d "$M/_internal/web" ] || [ -d "$M/../Frameworks/web" ] || errs="$errs web 资源"
-          [ -f "$M/_internal/web/js/bridge.js" ] || [ -f "$M/../Frameworks/web/js/bridge.js" ] || errs="$errs bridge.js(局域网模式的桥)"
+          # 资源与扩展的位置随 PyInstaller 版本变化(Frameworks / Resources /
+          # _internal 都用过),一律在整个 .app 里递归找,不猜目录名 ——
+          # 猜错会把「打包成功」误判成「文件缺失」。
+          WEB="$(find "$APP" -path '*/web/index.html' -print -quit)"
+          [ -n "$WEB" ] || errs="$errs web 资源"
+          BRIDGE="$(find "$APP" -path '*/web/js/bridge.js' -print -quit)"
+          [ -n "$BRIDGE" ] || errs="$errs bridge.js(局域网模式的桥)"
           [ -f "$M/tools/allure-commandline/bin/allure" ] || errs="$errs 便携 allure-commandline"
           [ -f "$M/tools/jre/Contents/Home/bin/java" ] || errs="$errs 便携 JRE"
-          if [ -d "$M/data" ]; then errs="$errs data/不该入包"; fi
+          # data/ 同样全包找;tools/ 里 JRE/allure 自带的同名目录用 -prune 跳过
+          DATA="$(find "$APP" -path '*/tools' -prune -o -type d -name 'data' -print -quit)"
+          if [ -n "$DATA" ]; then errs="$errs data/不该入包：$DATA"; fi
           if [ -n "$errs" ]; then echo "::error::布局校验失败：$errs"; exit 1; fi
 
           # 源码泄露 / 核心 .so 必须在包里。

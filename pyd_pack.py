@@ -44,6 +44,13 @@ DIST = (os.path.join("dist", APP_NAME + ".app", "Contents", "MacOS") if IS_MAC
         else os.path.join("dist", APP_NAME))
 APP_PATH = os.path.join("dist", APP_NAME + ".app") if IS_MAC else DIST
 
+# ---- 校验时的搜索根 ----
+# macOS 的 .app 是分层的:可执行文件在 Contents/MacOS,而 PyInstaller 把
+# Python 扩展(.so)与数据(web/)放进 Contents/Frameworks(部分版本是
+# Contents/Resources)。只搜 Contents/MacOS 会误报「未打进包」——
+# 打包其实成功了,是校验找错了地方。所以校验一律以整个 .app 为根。
+SEARCH_ROOT = APP_PATH if IS_MAC else DIST
+
 # ---- portable runtime to bundle ----
 # Windows 开发机是固定路径;macOS 走 build_mac.sh 下载到的 build_tools/;
 # CI 两种情况都由 ALLURE_SRC / JRE_SRC 环境变量注入(优先级最高)。
@@ -232,20 +239,24 @@ def _find(root, pattern):
 
 
 def verify_output():
-    """校验 PyInstaller 产物:可执行文件在、编译产物进了包、源码没泄露、web 资源在。"""
+    """校验 PyInstaller 产物:可执行文件在、编译产物进了包、源码没泄露、web 资源在。
+
+    注意:可执行文件按 DIST 找(mac 下是 Contents/MacOS),但编译产物与数据
+    要按 SEARCH_ROOT(整个 .app)找 —— macOS 上它们不在 MacOS 目录里。
+    """
     exe = os.path.join(DIST, APP_NAME + ("" if IS_MAC else ".exe"))
     if not os.path.isfile(exe):
         sys.exit("[FAIL] missing executable: " + exe)
 
-    compiled = _find(DIST, "pomelo_app.*." + EXT)
+    compiled = _find(SEARCH_ROOT, "pomelo_app.*." + EXT)
     if not compiled:
         sys.exit("[FAIL] pomelo_app.%s NOT bundled into the package" % EXT)
 
-    leaked = _find(DIST, "pomelo_app.py")
+    leaked = _find(SEARCH_ROOT, "pomelo_app.py")
     if leaked:
         sys.exit("[FAIL] source leaked into package: %s" % leaked)
 
-    if not _find(DIST, os.path.join("web", "index.html")):
+    if not _find(SEARCH_ROOT, os.path.join("web", "index.html")):
         sys.exit("[FAIL] web/ NOT bundled into the package")
 
     print("[pyd] verify OK: %s bundled, no source leak, web/ bundled"

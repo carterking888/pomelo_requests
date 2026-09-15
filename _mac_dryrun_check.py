@@ -20,6 +20,7 @@
 import ast
 import importlib.util
 import os
+import shutil
 import sys
 import types
 
@@ -176,6 +177,59 @@ def check_pyd_pack(mod):
           mod.java_home(os.path.join(tmp, "jre_std")))
     check("mac:兼容被打平的 <jre>/bin/java",
           mod.has_jre(os.path.join(tmp, "jre_flat")))
+    shutil.rmtree(tmp, ignore_errors=True)    # 别把探测目录留在仓库里
+
+
+# ============================================================
+#  2b. verify_output:mac .app 的分层布局
+# ============================================================
+def check_bundle_layout(mod):
+    """回归 CI 上的真故障。
+
+    PyInstaller 在 macOS 是分层的:可执行文件在 Contents/MacOS,而 Python
+    扩展(.so)与数据(web/)在 Contents/Frameworks。校验若只搜 MacOS,
+    就会把「打包成功」误报成「未打进包」——CI 上正是这么挂的。
+    """
+    print("\n[2b] pyd_pack.verify_output() 在 mac .app 布局下")
+    root = os.path.join(ROOT, ".workbuddy", "tmp", "_mac_app_probe")
+    app = os.path.join(root, "dist", "PomeloTool.app")
+    macos = os.path.join(app, "Contents", "MacOS")
+    fw = os.path.join(app, "Contents", "Frameworks")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(macos)
+    os.makedirs(os.path.join(fw, "web"))
+    open(os.path.join(macos, "PomeloTool"), "w").close()             # 可执行
+    open(os.path.join(fw, "pomelo_app.cpython-312-darwin.so"), "w").close()
+    open(os.path.join(fw, "web", "index.html"), "w").close()
+
+    saved = (mod.DIST, mod.APP_PATH, mod.SEARCH_ROOT)
+    mod.DIST = macos
+    mod.APP_PATH = app
+    mod.SEARCH_ROOT = app
+    try:
+        check("SEARCH_ROOT 在 mac 指向整个 .app",
+              mod.SEARCH_ROOT.replace("\\", "/").endswith("PomeloTool.app"),
+              mod.SEARCH_ROOT)
+
+        ok, detail = True, ""
+        try:
+            mod.verify_output()
+        except SystemExit as e:
+            ok, detail = False, str(e)
+        check("分层 .app 能通过校验(.so/数据在 Frameworks)", ok, detail)
+
+        # 反向对照:只搜 Contents/MacOS 必须失败。
+        # 否则说明这条断言根本覆盖不到该路径,是假绿。
+        mod.SEARCH_ROOT = macos
+        blind = False
+        try:
+            mod.verify_output()
+        except SystemExit:
+            blind = True
+        check("反向对照:只搜 MacOS 会误报(证明此回归有效)", blind)
+    finally:
+        mod.DIST, mod.APP_PATH, mod.SEARCH_ROOT = saved
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ============================================================
@@ -276,7 +330,9 @@ def main():
     print("macOS 分支 dry-run 预检(在 Windows 上模拟 darwin)")
     print("=" * 66)
     run_spec_as_mac()
-    check_pyd_pack(load_pyd_pack_as_mac())
+    pp = load_pyd_pack_as_mac()
+    check_pyd_pack(pp)
+    check_bundle_layout(pp)
     check_setup_clang_env()
     check_build_script()
 

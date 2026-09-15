@@ -124,8 +124,13 @@ CHK_ERR=""
 if [ "${SKIP_JRE:-}" != "1" ]; then
   [ -f "$MACOS_DIR/tools/jre/Contents/Home/bin/java" ] || CHK_ERR="便携 JRE"
 fi
-if [ -d "$MACOS_DIR/data" ]; then
-  die "data/ 不该被打进包(应用运行时在可执行文件旁自建)"
+# data/ 要在整个 .app 里找 —— PyInstaller 会把它塞进 Contents/Frameworks,
+# 只查 Contents/MacOS 会漏检。tools/ 内(JRE/allure 自带的数据目录)不算,
+# 用 -prune 跳过,避免误报。
+DATA_LEAK="$(find "$DIST_APP" -path '*/tools' -prune -o \
+             -type d -name 'data' -print -quit)"
+if [ -n "$DATA_LEAK" ]; then
+  die "data/ 不该被打进包(应用运行时在可执行文件旁自建): $DATA_LEAK"
 fi
 if [ -n "$CHK_ERR" ]; then
   die "产物布局校验失败,缺少: $CHK_ERR"
