@@ -233,6 +233,96 @@ def check_bundle_layout(mod):
 
 
 # ============================================================
+#  2c. sign_app:签名对象识别与顺序
+# ============================================================
+_MACHO = b"\xcf\xfa\xed\xfe" + b"\x00" * 16
+
+
+def check_sign_order(mod):
+    """回归「外层 .app 签名失败」。
+
+    本机没有 codesign,但顺序是纯逻辑 —— 用假的 Mach-O 文件 + 桩
+    subprocess 就能验证:叶子是否都先于 framework、framework 是否先于
+    外层、tools/ 是否在第一轮被跳过。
+    """
+    print("\n[2c] pyd_pack.sign_app() 签名对象与顺序")
+    root = os.path.join(ROOT, ".workbuddy", "tmp", "_mac_sign_probe")
+    app = os.path.join(root, "PomeloTool.app")
+    macos = os.path.join(app, "Contents", "MacOS")
+    fwver = os.path.join(app, "Contents", "Frameworks",
+                         "Python.framework", "Versions", "3.12")
+    shutil.rmtree(root, ignore_errors=True)
+
+    def macho(p):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(_MACHO)
+
+    macho(os.path.join(macos, "PomeloTool"))                      # 主可执行
+    macho(os.path.join(macos, "tools", "jre", "Contents", "Home",
+                       "bin", "java"))                            # JRE(应跳过)
+    macho(os.path.join(macos, "tools", "allure-commandline",
+                       "lib", "x.dylib"))                         # allure 库
+    macho(os.path.join(fwver, "Python"))                          # 无扩展名!
+    macho(os.path.join(fwver, "lib-dynload", "foo.cpython-312-darwin.so"))
+    with open(os.path.join(app, "Contents", "Info.plist"), "w") as fh:
+        fh.write("<plist/>")
+    try:
+        os.symlink("3.12", os.path.join(app, "Contents", "Frameworks",
+                                        "Python.framework", "Versions", "Current"))
+        link_ok = True
+    except (OSError, NotImplementedError):
+        link_ok = False                       # Windows 无权限建软链,跳过该项
+
+    check("按魔数识别 Mach-O(不看扩展名)",
+          mod._is_macho(os.path.join(fwver, "Python"))
+          and not mod._is_macho(os.path.join(ROOT, "pyd_pack.py")))
+    if link_ok:
+        m, b = mod._collect_codes(app, skip_tools=False)
+        check("符号链接不进入签名列表",
+              not any(os.path.islink(p) for p in m))
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    saved = (mod.APP_PATH, mod.subprocess, mod.shutil.which)
+    mod.APP_PATH = app
+    mod.subprocess = types.SimpleNamespace(run=fake_run)
+    mod.shutil.which = lambda name: "/usr/bin/codesign"
+    try:
+        mod.sign_app()
+    finally:
+        mod.APP_PATH, mod.subprocess, mod.shutil.which = saved
+
+    signs = [c[-1] for c in calls if "codesign" in c[0] and "--force" in c]
+    norm = [p.replace("\\", "/") for p in signs]
+    fw = next((i for i, p in enumerate(norm)
+               if p.endswith("Python.framework")), None)
+    outer = next((i for i, p in enumerate(norm)
+                  if p.endswith("PomeloTool.app")), None)
+
+    check("framework 主二进制(无扩展名)被签", any(
+        p.endswith("Versions/3.12/Python") for p in norm), norm)
+    check("tools/ 在 pass 1 被跳过",
+          not any("/tools/" in p for p in norm))
+    check("framework 作为整体被重签", fw is not None)
+    if fw is not None:
+        inner = [i for i, p in enumerate(norm)
+                 if "/Python.framework/" in p]
+        check("叶子全部先于 framework(顺序反了等于白签)",
+              bool(inner) and all(i < fw for i in inner),
+              "fw=%s inner=%s" % (fw, inner))
+        check("framework 先于外层 .app", outer is not None and fw < outer,
+              "fw=%s outer=%s" % (fw, outer))
+    check("外层 .app 是最后一次签名",
+          outer is not None and outer == len(norm) - 1, norm[-1:])
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# ============================================================
 #  3. setup_pyd.py:setup_clang_env
 # ============================================================
 def check_setup_clang_env():
@@ -333,6 +423,7 @@ def main():
     pp = load_pyd_pack_as_mac()
     check_pyd_pack(pp)
     check_bundle_layout(pp)
+    check_sign_order(pp)
     check_setup_clang_env()
     check_build_script()
 

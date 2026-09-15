@@ -266,16 +266,93 @@ def verify_output():
 
 # ---------------- macOS 专属:签名 ----------------
 
+# Mach-O 魔数:用来判断"这个文件是不是需要签名的可执行体"。
+# 不能只看扩展名 —— JRE 的 bin/java、Python.framework 的主二进制
+# (Versions/3.12/Python)都没有扩展名,漏签它们正是外层 .app 签名失败的原因。
+_MACHO_MAGICS = (
+    b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",   # MH_MAGIC(_64),小端
+    b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",   # MH_MAGIC(_64),大端
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",   # 胖二进制(fat)
+)
+
+
+def _is_macho(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) in _MACHO_MAGICS
+    except OSError:
+        return False
+
+
+def _sign_one(path):
+    """ad-hoc 签单个文件 / bundle,失败时打印 codesign 的真实报错。
+
+    原来是直接继承子进程输出,失败只有一句 "exit code 1",根本看不出是
+    哪个嵌套对象签名无效 —— 排查只能靠猜(上一次就是这么卡住的)。
+    """
+    r = subprocess.run(["codesign", "--force", "-s", "-", path],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print("[sign]   FAIL %s" % path)
+        for line in (r.stderr or r.stdout or "").strip().splitlines()[:4]:
+            print("[sign]        " + line)
+        return False
+    return True
+
+
+def _collect_codes(root, skip_tools=False):
+    """收集待签名对象:叶子 Mach-O 与嵌套 bundle。
+
+    符号链接一律跳过 —— 跟在软链上签名会落到真实文件上,既重复又容易
+    踩进 JRE 内部。
+    """
+    machos, bundles = [], []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if skip_tools and (os.sep + "tools" + os.sep) in (dirpath + os.sep):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames
+                       if not os.path.islink(os.path.join(dirpath, d))]
+        for d in dirnames:
+            if d.endswith(".framework"):
+                bundles.append(os.path.join(dirpath, d))
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if os.path.islink(p) or not os.path.isfile(p):
+                continue
+            if _is_macho(p):
+                machos.append(p)
+    return machos, bundles
+
+
+def _sign_tree(skip_tools=False):
+    """自内向外签一遍,返回外层 .app 是否签成功。"""
+    machos, bundles = _collect_codes(APP_PATH, skip_tools)
+    ok = sum(1 for p in machos if _sign_one(p))
+    print("[sign] Mach-O %d/%d%s"
+          % (ok, len(machos), "(跳过 tools/)" if skip_tools else "(含 tools/)"))
+    # framework 内部文件被改动后它自己的封条就失效了,必须整体重签,
+    # 而且一定要在叶子之后 —— 顺序反了等于白签。
+    for b in sorted(bundles, key=len, reverse=True):
+        _sign_one(b)
+    if bundles:
+        print("[sign] nested bundle %d" % len(bundles))
+    return _sign_one(APP_PATH)
+
+
 def sign_app():
-    """ad-hoc 签名 .app。
+    """ad-hoc 签名 .app(自内向外)。
 
     为什么必须做:Apple Silicon 上**未签名的 Mach-O 根本不会被加载**,双击就是
     一句"无法打开"。这不是为了美观,是能不能跑的前提。
 
-    为什么不用 `codesign --deep`:--deep 会把包里所有嵌套二进制重签一遍,
-    JRE 那几百个由 Adoptium 官方签好的可执行文件被改成 ad-hoc 签名后,
-    java 反而起不来。所以只签包内自带的 .so,再签 .app 本身;
-    JRE 保持它出厂时的签名不动。
+    为什么不用 `codesign --deep`:--deep 会把嵌套二进制的签名选项一起抹掉,
+    JRE 里 java 依赖的 JIT 相关 entitlements 会丢,反而起不来。
+
+    顺序是关键(踩过):**叶子 Mach-O → framework → 外层 .app**。
+    只签 .so 远远不够 —— ① frameworks/Python.framework 的内部文件被改后,
+    它自己的封条失效,必须把它当整体重签;② framework 主二进制没有扩展名,
+    按 `*.so` 找会漏掉。两者任一遗漏,签外层时都会报嵌套代码无效。
     """
     if not IS_MAC or not SIGN:
         return
@@ -287,12 +364,18 @@ def sign_app():
     # 下载/解压带来的隔离标记会让 Gatekeeper 直接拦下,先清掉
     sh(["xattr", "-cr", APP_PATH])
 
-    sos = glob.glob(os.path.join(APP_PATH, "**", "*.so"), recursive=True)
-    for so in sos:
-        sh(["codesign", "--force", "-s", "-", so])
-    print("[sign] ad-hoc signed %d nested .so" % len(sos))
+    # 第一轮:不碰 tools/ —— JRE 出厂签名完好时没必要动它
+    print("[sign] ---- pass 1: 包内自建代码 ----")
+    if _sign_tree(skip_tools=True):
+        print("[sign] ad-hoc 签名完成")
+    else:
+        # 第二轮:连 tools/ 一起重签。出厂签名有缺失或失效时,只有统一
+        # 重签才能让外层通过。ad-hoc 且不启用 hardened runtime,
+        # java 的 JIT 不受限,仍可正常启动。
+        print("[sign] pass 1 未通过 -> 全量重签(含 tools/)")
+        if not _sign_tree(skip_tools=False):
+            sys.exit("[FAIL] .app 签名失败,原因见上方 codesign 输出")
 
-    sh_ok(["codesign", "--force", "-s", "-", APP_PATH])
     r = sh(["codesign", "--verify", "--verbose=2", APP_PATH])
     if r.returncode == 0:
         print("[sign] codesign verify OK")
