@@ -1,0 +1,1661 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1280, initial-scale=1.0" />
+  <title>Pomelo 接口测试平台</title>
+
+  <!-- layui 2.x 视觉组件(本地 vendor 优先,保证离线可用) -->
+  <link rel="stylesheet" href="vendor/layui/css/layui.css?v=20260915-2" />
+  <!-- 全局定制样式(贴近截图视觉) -->
+  <link rel="stylesheet" href="css/app.css?v=20260915-2" />
+</head>
+<!-- @vue:mounted 是 petite-vue 唯一支持的"挂载完成"钩子;
+     createApp() 的 created()/mounted() 选项不会被调用 -->
+<body @vue:mounted="init()">
+
+<!-- ======================== 顶部导航 ======================== -->
+<header class="pomelo-header" v-cloak>
+  <div class="pomelo-header__left">
+    <div class="pomelo-logo">
+      <span class="pomelo-logo__icon"></span>
+      <div class="pomelo-logo__text">
+        <strong>Pomelo</strong>
+        <em>接口测试平台</em>
+      </div>
+    </div>
+  </div>
+
+  <nav class="pomelo-nav" @click="navigateTo($event)">
+    <a href="#/dashboard"  data-route="dashboard"  :class="{'is-active': route==='dashboard'}">
+      <i class="layui-icon layui-icon-home"></i> 仪表盘
+    </a>
+    <a href="#/apicases"   data-route="apicases"   :class="{'is-active': route==='apicases'}">
+      <i class="layui-icon layui-icon-link"></i> 接口用例
+    </a>
+    <a href="#/testrun"    data-route="testrun"    :class="{'is-active': route==='testrun'}">
+      <i class="layui-icon layui-icon-play"></i> 测试执行
+    </a>
+    <a href="#/reports"    data-route="reports"    :class="{'is-active': route==='reports'}">
+      <i class="layui-icon layui-icon-form"></i> 测试报告
+    </a>
+  </nav>
+
+  <div class="pomelo-header__right">
+    <!-- 访问地址:点地址用浏览器打开;「复制」把地址发给同事。
+         端口由后端按 18080 → 18081 决定,地址不写死,启动后问后端拿。 -->
+    <div v-if="access.ready" class="addr-chip"
+         :class="{'is-error': access.feedbackType==='error'}"
+         :title="access.hint">
+      <button type="button" class="addr-chip__open" @click="access.openBrowser()">
+        <i class="layui-icon layui-icon-website"></i>
+        <span class="addr-chip__url">{{ access.feedback || access.display }}</span>
+      </button>
+      <span class="addr-chip__sep"></span>
+      <button type="button" class="addr-chip__copy" @click="access.copy()">
+        {{ access.copied ? "已复制" : "复制" }}
+      </button>
+    </div>
+
+    <div class="pomelo-search">
+      <i class="layui-icon layui-icon-search"></i>
+      <input type="text" placeholder="搜索项目、用户..." />
+    </div>
+  </div>
+</header>
+
+<!-- ======================== 主内容区 ======================== -->
+<main class="pomelo-main" v-cloak>
+
+  <!-- 1. 仪表盘 ============================================ -->
+  <section v-show="route==='dashboard'" class="pomelo-page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">仪表盘</h1>
+        <p class="page-desc">欢迎回来,这里是 Pomelo 接口测试平台的整体运行概览</p>
+      </div>
+      <div class="page-head__actions">
+        <div class="range-picker">
+          <button class="btn btn-ghost" @click="dashboard.toggleRange()">
+            <i class="layui-icon layui-icon-date"></i> 最近 {{ dashboard.rangeDays }} 天
+            <i class="layui-icon layui-icon-down range-picker__caret"></i>
+          </button>
+          <ul v-if="dashboard.rangeOpen" class="range-menu">
+            <li v-for="d in [7,15,30]" :key="d">
+              <button type="button" class="range-menu__item"
+                      :class="{'is-active': d === dashboard.rangeDays}"
+                      @click="dashboard.setRangeDays(d)">
+                最近 {{ d }} 天
+                <i v-if="d === dashboard.rangeDays" class="layui-icon layui-icon-ok"></i>
+              </button>
+            </li>
+          </ul>
+        </div>
+        <button class="btn btn-primary" @click="newcase.resetForm(); goTo('#/apicases-new')">
+          <i class="layui-icon layui-icon-add-circle"></i> 新增用例
+        </button>
+      </div>
+    </div>
+
+    <!-- 4 个统计卡 -->
+    <div class="stat-grid">
+      <div class="stat-card" v-for="card in dashboard.stats" :key="card.label">
+        <div class="stat-card__icon" :style="{background: card.bg}">
+          <span class="stat-svg" v-html="card.icon"></span>
+        </div>
+        <div class="stat-card__trend" v-if="card.trendDir" :class="card.trendDir">
+          <i :class="card.trendIcon"></i>
+          {{ card.absTrend }}%
+        </div>
+        <div class="stat-card__label">{{ card.label }}</div>
+        <div class="stat-card__value">{{ card.value }}</div>
+        <div class="stat-card__sub" v-if="card.sub">{{ card.sub }}</div>
+      </div>
+    </div>
+
+    <!-- 中部三栏:趋势 + 通过率 + 留白 -->
+    <div class="dash-row">
+      <div class="card chart-card chart-card--wide">
+        <div class="card__header">
+          <div>
+            <h3>测试执行趋势</h3>
+            <p>最近 {{ dashboard.rangeDays }} 天按日测试执行情况</p>
+          </div>
+          <div class="legend">
+            <span><i class="dot dot-blue"></i>通过</span>
+            <span><i class="dot dot-red"></i>失败</span>
+            <span><i class="dot dot-orange"></i>跳过</span>
+          </div>
+        </div>
+        <div class="chart" id="trendChart"></div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="card__header">
+          <h3>测试通过率</h3>
+          <p>本周整体执行结果</p>
+        </div>
+        <div class="chart chart--donut" id="rateChart"></div>
+        <div class="donut-legend">
+          <span><i class="dot dot-blue"></i> {{ dashboard.rate.passed }} 通过</span>
+          <span><i class="dot dot-red"></i> {{ dashboard.rate.failed }} 失败</span>
+          <span><i class="dot dot-orange"></i> {{ dashboard.rate.skipped }} 跳过</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部两栏:最近执行记录 + 测试项目 -->
+    <div class="dash-row">
+      <div class="card list-card">
+        <div class="card__header">
+          <div>
+            <h3>最近执行记录</h3>
+            <p>最近 5 次测试执行情况</p>
+          </div>
+          <a href="javascript:;" class="card__more">查看全部 &rsaquo;</a>
+        </div>
+        <ul class="run-list">
+          <li v-for="run in dashboard.runs" :key="run.id" style="cursor:pointer"
+              @click="goTo('#/report-detail/' + run.reportNo)">
+            <span class="run-list__icon" :class="'is-'+run.status">
+              <i :class="run.icon"></i>
+            </span>
+            <div class="run-list__main">
+              <div class="run-list__title">{{ run.title }} <span class="muted">#{{ run.reportNo }}</span></div>
+              <div class="run-list__meta">
+                环境:{{ run.env }} · 用例 {{ run.total }}
+              </div>
+            </div>
+            <div class="run-list__stat">
+              <span class="stat-pass">通过 {{ run.passed }}</span>
+              <span class="stat-fail">失败 {{ run.failed }}</span>
+              <span class="stat-skip">跳过 {{ run.skipped }}</span>
+            </div>
+            <div class="run-list__duration muted">{{ run.duration }}</div>
+            <button class="btn-mini" @click.stop="reports.openAllureReport(run.reportNo)">Allure 报告</button>
+          </li>
+          <li v-if="dashboard.runs.length===0" style="justify-content:center;color:var(--c-muted);padding:18px 0">暂无执行记录,执行套件后自动生成</li>
+        </ul>
+      </div>
+
+      <div class="card list-card">
+        <div class="card__header">
+          <div>
+            <h3>测试项目</h3>
+            <p>共 {{ dashboard.projects.length }} 个测试项目</p>
+          </div>
+          <a href="javascript:;" class="card__more" @click="dashboard.openNewModule()">+ 新建</a>
+        </div>
+        <ul class="proj-list">
+          <li v-for="p in dashboard.projects" :key="p.id || p.name">
+            <span class="proj-list__icon" :style="{background: p.bg}">
+              <span class="stat-svg" v-html="p.icon"></span>
+            </span>
+            <div class="proj-list__main">
+              <div class="proj-list__name">{{ p.name }}</div>
+              <div class="proj-list__meta">{{ p.cases }} 个用例</div>
+            </div>
+            <span class="proj-list__status" :class="'is-'+p.status">
+              {{ p.statusLabel }}
+            </span>
+          </li>
+          <li v-if="dashboard.projects.length===0" style="justify-content:center;color:var(--c-muted);padding:18px 0">还没有测试项目,点击右上角 + 新建</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 新建模块弹窗(仪表盘底部) -->
+    <div v-if="dashboard.showNewModule" class="modal-mask" @click.self="dashboard.closeNewModule()">
+      <div class="modal modal--sm">
+        <h3>新建测试模块</h3>
+        <p>填写后将写入 <code>data/modules/modules.json</code>;<br/>
+           顶部 tab、新建用例与新建套件的"所属项目"下拉会同步更新。</p>
+        <label class="form-row form-row--full" style="margin-top:8px">
+          <span>模块名称 <em style="color:#ef4444">*</em></span>
+          <input id="newModuleName" type="text" v-model="dashboard.newModuleName"
+                 @keydown.enter.prevent="dashboard.confirmNewModule()"
+                 placeholder="例:登录" />
+        </label>
+        <div v-if="dashboard.newModuleErr" class="toast is-error" style="margin-top:8px">
+          <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+          <span>{{ dashboard.newModuleErr }}</span>
+        </div>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="dashboard.closeNewModule()">取消</button>
+          <button class="btn btn-primary btn-sm" @click="dashboard.confirmNewModule()">保存</button>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- 2. 接口用例 ============================================ -->
+  <section v-show="route==='apicases'" class="pomelo-page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">接口用例</h1>
+        <p class="page-desc">管理所有接口测试用例,支持搜索、筛选和批量操作</p>
+      </div>
+      <div class="page-head__actions">
+
+        <button class="btn btn-primary" @click="newcase.resetForm(); goTo('#/apicases-new')">
+          <i class="layui-icon layui-icon-add-circle"></i> 新增用例
+        </button>
+      </div>
+    </div>
+
+    <!-- 项目分类 Tabs -->
+    <!-- 说明:v-for 之后追加两个模块管理入口。
+         · 新建模块 -> apicases.openNewModule()
+         · 删除模块 -> 只在非"全部用例"时出现;模块名取 _tabProject[activeTab]
+           (_tabProject 是 {key:name} 映射对象,不能整体传入) -->
+    <div class="tab-bar">
+      <button v-for="t in apicases.tabs" :key="t.key"
+              :class="{'is-active': apicases.activeTab===t.key}"
+              @click="apicases.activeTab=t.key; apicases.page=1">
+        {{ t.label }}
+      </button>
+      <button class="tab-bar__op" title="新建模块" @click="apicases.openNewModule()">
+        <i class="layui-icon layui-icon-add-circle"></i> 新建模块
+      </button>
+      <button v-if="apicases.activeTab!=='all'" class="tab-bar__op" title="修改当前模块名称"
+              @click="apicases.openRenameModule(apicases._tabProject[apicases.activeTab])">
+        <i class="layui-icon layui-icon-edit"></i> 修改模块
+      </button>
+      <button v-if="apicases.activeTab!=='all'" class="tab-bar__op tab-bar__op--danger"
+              title="删除当前模块"
+              @click="apicases.openDelModule(apicases._tabProject[apicases.activeTab])">
+        <i class="layui-icon layui-icon-delete"></i> 删除模块
+      </button>
+    </div>
+
+    <!-- 搜索 / 筛选 / 视图 -->
+    <div class="toolbar">
+      <div class="search-input">
+        <i class="layui-icon layui-icon-search"></i>
+        <input type="text" placeholder="搜索用例名称、接口路径..." v-model="apicases.keyword" @input="apicases.page=1" />
+      </div>
+      <div class="toolbar__filters">
+        <!-- 请求方法筛选(选项从列表真实数据取,原先是没绑事件的死按钮) -->
+        <div class="btn-select-wrap">
+          <button class="btn-select" :class="{'is-filtered': apicases.filterMethod}"
+                  @click.stop="apicases.toggleFilterMenu('method')">
+            {{ apicases.methodBtnLabel }} <i class="layui-icon layui-icon-down"></i>
+          </button>
+          <div class="btn-select-menu" v-if="apicases.menuOpen==='method'" @click.stop>
+            <button class="btn-select-menu__item" :class="{'is-active': !apicases.filterMethod}"
+                    @click="apicases.pickMethod('')">全部方法</button>
+            <button v-for="m in apicases.methodOptions" :key="m" class="btn-select-menu__item"
+                    :class="{'is-active': apicases.filterMethod===m}"
+                    @click="apicases.pickMethod(m)">{{ m }}</button>
+            <span v-if="apicases.methodOptions.length===0" class="btn-select-menu__empty">暂无可选</span>
+          </div>
+        </div>
+        <!-- 标签筛选 -->
+        <div class="btn-select-wrap">
+          <button class="btn-select" :class="{'is-filtered': apicases.filterTag}"
+                  @click.stop="apicases.toggleFilterMenu('tag')">
+            {{ apicases.tagBtnLabel }} <i class="layui-icon layui-icon-down"></i>
+          </button>
+          <div class="btn-select-menu" v-if="apicases.menuOpen==='tag'" @click.stop>
+            <button class="btn-select-menu__item" :class="{'is-active': !apicases.filterTag}"
+                    @click="apicases.pickTag('')">全部标签</button>
+            <button v-for="t in apicases.tagOptions" :key="t" class="btn-select-menu__item"
+                    :class="{'is-active': apicases.filterTag===t}"
+                    @click="apicases.pickTag(t)">{{ t }}</button>
+            <span v-if="apicases.tagOptions.length===0" class="btn-select-menu__empty">用例还没有标签</span>
+          </div>
+        </div>
+      </div>
+      <div class="toolbar__right">
+        <button class="btn btn-ghost btn-sm">批量操作</button>
+        <div class="view-toggle">
+          <button :class="{'is-active': apicases.view==='table'}" @click="apicases.view='table'">
+            <i class="layui-icon layui-icon-list"></i>
+          </button>
+          <button :class="{'is-active': apicases.view==='grid'}" @click="apicases.view='grid'">
+            <i class="layui-icon layui-icon-template-1"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 表格视图 -->
+    <div v-show="apicases.view==='table'" class="card table-card">
+      <table class="layui-table pomelo-table">
+        <thead>
+          <tr>
+            <th style="width:36px"><input type="checkbox" /></th>
+            <th>用例名称</th>
+            <th style="width:80px">方法</th>
+            <th>接口路径</th>
+            <th style="width:120px">所属项目</th>
+            <th style="width:140px">标签</th>
+            <th style="width:80px">状态</th>
+            <th style="width:130px">更新时间</th>
+            <th style="width:130px">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="c in apicases.pagedList" :key="c.id">
+            <td><input type="checkbox" /></td>
+            <td>{{ c.name }}</td>
+            <td>
+              <span class="method-tag" :class="c.methodCls">{{ c.method }}</span>
+            </td>
+            <td class="api-path">{{ c.path }}</td>
+            <td>{{ c.project }}</td>
+            <td>
+              <span v-for="tag in c.tags" :key="tag.text" class="tag-chip" :class="tag.cls">{{ tag.text }}</span>
+              <span v-if="!c.hasTags" class="muted">—</span>
+            </td>
+            <td>
+              <span class="state-tag" :class="'is-'+c.state">
+                <i class="dot" :class="'dot-'+c.dotCls"></i>
+                {{ c.stateLabel }}
+              </span>
+            </td>
+            <td class="muted">{{ c.updated }}</td>
+            <td class="op-cell">
+              <button class="icon-btn" title="运行"><i class="layui-icon layui-icon-play"></i></button>
+              <button class="icon-btn" title="编辑" @click="apicases.viewCase(c.id)">
+                <i class="layui-icon layui-icon-edit"></i>
+              </button>
+              <button class="icon-btn" title="更多" @click.stop="apicases.toggleMenu(c.id)">
+                <i class="layui-icon layui-icon-more"></i>
+              </button>
+              <div class="row-menu" v-if="apicases.menuFor===c.id" @click.stop>
+                <button class="row-menu__item" @click="apicases.viewCaseOnly(c.id)">
+                  <i class="layui-icon layui-icon-eye"></i>查看
+                </button>
+                <button class="row-menu__item" @click="apicases.copyCase(c.id)">
+                  <i class="layui-icon layui-icon-file"></i>复制
+                </button>
+                <button class="row-menu__item row-menu__item--danger" @click="apicases.askRemoveCase(c.id)">
+                  <i class="layui-icon layui-icon-delete"></i>{{ apicases.confirmDelId===c.id ? '确认删除' : '删除' }}
+                </button>
+              </div>
+            </td>
+          </tr>
+          <tr v-if="apicases.total===0">
+            <td colspan="9" class="muted" style="text-align:center;padding:24px">没有匹配的用例</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="pager" v-if="apicases.total>0">
+        <span class="muted">共 {{ apicases.pageInfo.total }} 条用例,当前显示第 {{ apicases.pageInfo.from }}-{{ apicases.pageInfo.to }} 条</span>
+        <div class="pager__pages">
+          <button class="page-btn" :disabled="apicases.pageInfo.cur<=1"
+                  @click="apicases.goPage(apicases.pageInfo.cur-1)">
+            <i class="layui-icon layui-icon-left"></i>
+          </button>
+          <button v-for="pg in apicases.pageInfo.pages" :key="pg.k"
+                  class="page-btn"
+                  :class="{'is-active': !pg.ell && apicases.pageInfo.cur===pg.n}"
+                  :disabled="pg.ell"
+                  @click="pg.ell ? null : apicases.goPage(pg.n)">{{ pg.label }}</button>
+          <button class="page-btn" :disabled="apicases.pageInfo.cur>=apicases.pageInfo.pageCount"
+                  @click="apicases.goPage(apicases.pageInfo.cur+1)">
+            <i class="layui-icon layui-icon-right"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 卡片视图 -->
+    <div v-show="apicases.view==='grid'" class="case-grid">
+      <div class="case-grid__card" v-for="c in apicases.pagedList" :key="c.id">
+        <div class="case-grid__head">
+          <span class="case-grid__name" :title="c.name">{{ c.name }}</span>
+          <span class="method-tag" :class="c.methodCls">{{ c.method }}</span>
+        </div>
+        <div class="case-grid__path">{{ c.path }}</div>
+        <div class="case-grid__meta">
+          <i class="layui-icon layui-icon-template"></i> {{ c.project }}
+        </div>
+        <div class="case-grid__tags">
+          <span v-for="tag in c.tags" :key="tag.text" class="tag-chip" :class="tag.cls">{{ tag.text }}</span>
+          <span v-if="!c.hasTags" class="tag-none">无标签</span>
+        </div>
+        <div class="case-grid__foot">
+          <span class="state-tag" :class="'is-'+c.state">
+            <i class="dot" :class="'dot-'+c.dotCls"></i>
+            {{ c.stateLabel }}
+          </span>
+          <span>{{ c.updated }}</span>
+        </div>
+      </div>
+      <div v-if="apicases.total===0" class="case-grid__empty">没有匹配的用例</div>
+    </div>
+
+    <!-- 新建模块弹窗(接口用例页) -->
+    <!-- 与仪表盘 176 行那份是同结构不同 scope;input id 必须区分,
+         否则 apicases.js openNewModule() 的 getElementById 会聚焦到仪表盘那个 -->
+    <div v-if="apicases.showNewModule" class="modal-mask" @click.self="apicases.closeNewModule()">
+      <div class="modal modal--sm">
+        <h3>新建测试模块</h3>
+        <p>填写后将写入 <code>data/modules/modules.json</code>;<br/>
+           顶部 tab、新建用例与新建套件的"所属项目"下拉会同步更新。</p>
+        <label class="form-row form-row--full" style="margin-top:8px">
+          <span>模块名称 <em style="color:#ef4444">*</em></span>
+          <input id="apicasesNewModuleName" type="text" v-model="apicases.newModuleName"
+                 @keydown.enter.prevent="apicases.confirmNewModule()"
+                 placeholder="例:登录" />
+        </label>
+        <div v-if="apicases.newModuleErr" class="toast is-error" style="margin-top:8px">
+          <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+          <span>{{ apicases.newModuleErr }}</span>
+        </div>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="apicases.closeNewModule()">取消</button>
+          <button class="btn btn-primary btn-sm" @click="apicases.confirmNewModule()">保存</button>
+        </div>
+      </div>
+    </div>
+    <!-- 修改模块弹窗(接口用例页):只改显示名,key/目录不动,级联更新用例与套件的项目名 -->
+    <div v-if="apicases.showRenameModule" class="modal-mask" @click.self="apicases.closeRenameModule()">
+      <div class="modal modal--sm">
+        <h3>修改模块「{{ apicases.renameModuleOld }}」</h3>
+        <p>只改显示名,模块目录与用例文件位置不变;<br/>
+           引用该项目的<strong>用例与套件会同步改为新名</strong>。</p>
+        <label class="form-row form-row--full" style="margin-top:8px">
+          <span>新模块名称 <em style="color:#ef4444">*</em></span>
+          <input id="apicasesRenameModuleName" v-model="apicases.renameModuleName"
+                 maxlength="32" placeholder="输入新的模块名称" />
+        </label>
+        <div v-if="apicases.renameModuleErr" class="toast is-error" style="margin-top:8px">
+          <i class="layui-icon layui-icon-close-fill"></i>
+          <span>{{ apicases.renameModuleErr }}</span>
+        </div>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="apicases.closeRenameModule()">取消</button>
+          <button class="btn btn-primary btn-sm" :disabled="apicases.renameBusy"
+                  @click="apicases.confirmRenameModule()">{{ apicases.renameBusy ? '保存中...' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+    <!-- 删除模块确认弹窗(接口用例页) -->
+    <!-- openDelModule() 已先跑过 dry_run 预览,这里只负责展示清单 + 收二次确认。
+         字段严格对齐 apicases.js 32-47 行的 8 个平铺 state:
+         delModuleName / delModuleKey / delModuleFiles / delModuleCount
+         delModuleDir / delModuleErr / delBusy / showDelModule -->
+    <div v-if="apicases.showDelModule" class="modal-mask" @click.self="apicases.closeDelModule()">
+      <div class="modal modal--sm">
+        <h3>删除模块「{{ apicases.delModuleName }}」</h3>
+        <p>将从 <code>data/modules/modules.json</code> 移除该模块,并删除目录
+           <code>{{ apicases.delModuleDir || ('data/cases/' + apicases.delModuleKey) }}</code>
+           下的 <strong>{{ apicases.delModuleCount }}</strong> 个用例文件。<br/>
+           <em style="color:#ef4444">此操作不可恢复。</em></p>
+        <ul v-if="apicases.delModuleCount" class="del-file-list">
+          <li v-for="f in apicases.delModuleFiles" :key="f">{{ f }}</li>
+        </ul>
+        <p v-else class="del-file-empty">该模块目录下没有用例文件,仅移除模块本身。</p>
+        <div v-if="apicases.delModuleErr" class="toast is-error" style="margin-top:8px">
+          <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+          <span>{{ apicases.delModuleErr }}</span>
+        </div>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="apicases.closeDelModule()">取消</button>
+          <button class="btn btn-danger btn-sm" :disabled="apicases.delBusy"
+                  @click="apicases.confirmDelModule()">
+            {{ apicases.delBusy ? '删除中…' : '确认删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. 用例详情 ============================================ -->
+  <section v-show="route==='apicases-detail'" class="pomelo-page" :class="{'page-readonly': apidetail.readonly}">
+    <div class="breadcrumb">
+      <a href="javascript:;" @click="goTo('#/apicases')">返回用例列表</a>
+      <span class="bc-sep">/</span>
+      <span class="bc-cur">{{ apidetail.readonly ? '查看用例' : '编辑用例' }}</span>
+    </div>
+
+    <div class="detail-head">
+      <div class="detail-head__title">
+        <h1>{{ apidetail.case.name }}</h1>
+        <div class="detail-head__tags">
+          <span class="method-tag" :class="'m-'+apidetail.methodCls">{{ apidetail.methodLabel }}</span>
+          <span class="muted">{{ apidetail.case.path }}</span>
+          <span class="muted">·</span>
+          <span class="muted">{{ apidetail.case.project }}</span>
+          <span class="state-tag" :class="'is-'+apidetail.case.state">
+            <i class="dot" :class="'dot-'+apidetail.dotCls"></i> {{ apidetail.stateLabel }}
+          </span>
+        </div>
+      </div>
+      <div class="detail-head__actions">
+        <!-- 查看模式:给一个「编辑」入口跳回编辑路由 -->
+        <button v-if="apidetail.readonly" class="btn btn-primary"
+          @click="goTo(apidetail.editHash)"><i class="layui-icon layui-icon-edit"></i> 编辑</button>
+        <template v-if="!apidetail.readonly">
+          <button class="btn btn-primary" @click="apidetail.saveCase()"
+                  :disabled="apidetail.saving"><i class="layui-icon layui-icon-ok-circle"></i> {{ apidetail.saving ? '保存中...' : '保存用例' }}</button>
+        </template>
+      </div>
+    </div>
+    <p v-if="apidetail.notFound" class="muted" style="margin:0 0 12px">未找到该用例的落盘数据,请返回列表重新进入</p>
+
+    <div class="detail-grid detail-grid--wide">
+      <!-- 左主列 -->
+      <div class="detail-main">
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求配置</h3>
+            <!-- 用例状态(与新建用例页一致) -->
+            <div class="state-switch state-switch--lg" title="用例状态">
+              <button :class="{'is-active': apidetail.case.state==='on'}"
+                      @click="apidetail.case.state='on'">已启用</button>
+              <button :class="{'is-active': apidetail.case.state==='off'}"
+                      @click="apidetail.case.state='off'">已停用</button>
+            </div>
+          </div>
+          <div class="form-grid">
+            <label class="form-row">
+              <span>用例名称 <em style="color:#ef4444">*</em></span>
+              <input type="text" v-model="apidetail.case.name" />
+            </label>
+            <label class="form-row">
+              <span>所属项目</span>
+              <select v-model="apidetail.case.project">
+                <option v-for="p in apidetail.projectOptions" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </label>
+            <label class="form-row">
+              <span>协议模式</span>
+              <div class="state-switch state-switch--lg" title="用例协议">
+                <button :class="{'is-active': apidetail.case.protocol==='socket'}"
+                        @click="apidetail.case.protocol='socket'">Socket</button>
+                <button :class="{'is-active': apidetail.case.protocol==='http'}"
+                        @click="apidetail.case.protocol='http'">HTTP</button>
+              </div>
+            </label>
+            <label class="form-row form-row--full">
+              <span>接口路径 <em style="color:#ef4444">*</em></span>
+              <div class="input-group" :class="apidetail.pathSoloCls">
+                <!-- socket 用例没有请求方法,方法下拉只在 http 模式出现 -->
+                <select v-if="apidetail.case.protocol==='http'" v-model="apidetail.case.method">
+                  <option v-for="m in apidetail.methods" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <input type="text" v-model="apidetail.case.path" :placeholder="apidetail.pathPlaceholder" />
+              </div>
+            </label>
+            <label class="form-row form-row--full">
+              <span>用例描述</span>
+              <textarea v-model="apidetail.case.desc" placeholder="描述这个用例要验证什么,方便以后维护"></textarea>
+            </label>
+          </div>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求 Headers</h3>
+            <button class="btn btn-ghost btn-sm" @click="apidetail.addHeader()">+ 添加</button>
+          </div>
+          <table class="kv-table">
+            <thead><tr><th style="width:32%">Key</th><th>Value</th><th style="width:60px"></th></tr></thead>
+            <tbody>
+              <tr v-for="(h,i) in apidetail.headers" :key="i">
+                <td><input type="text" v-model="h.key" /></td>
+                <td><input type="text" v-model="h.value" /></td>
+                <td><button class="icon-btn" @click="apidetail.rmHeader(i)"><i class="layui-icon layui-icon-delete"></i></button></td>
+              </tr>
+              <tr v-if="apidetail.headers.length===0"><td colspan="3" class="is-empty">暂无 Headers</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>查询参数 Params</h3>
+            <button class="btn btn-ghost btn-sm" @click="apidetail.addParam()">+ 添加</button>
+          </div>
+          <table class="kv-table">
+            <thead><tr><th style="width:32%">Key</th><th>Value</th><th style="width:60px"></th></tr></thead>
+            <tbody>
+              <tr v-for="(p,i) in apidetail.params" :key="i">
+                <td><input type="text" v-model="p.key" /></td>
+                <td><input type="text" v-model="p.value" /></td>
+                <td><button class="icon-btn" @click="apidetail.rmParam(i)"><i class="layui-icon layui-icon-delete"></i></button></td>
+              </tr>
+              <tr v-if="apidetail.params.length===0"><td colspan="3" class="is-empty">暂无查询参数</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求 Body</h3>
+            <div class="body-tabs">
+              <button :class="{'is-active':apidetail.bodyTab==='json'}"  @click="apidetail.bodyTab='json'">JSON</button>
+              <button :class="{'is-active':apidetail.bodyTab==='form'}"  @click="apidetail.bodyTab='form'">Form</button>
+              <button :class="{'is-active':apidetail.bodyTab==='raw'}"   @click="apidetail.bodyTab='raw'">Raw</button>
+            </div>
+          </div>
+          <textarea class="json-block" v-model="apidetail.bodyJson" rows="8" style="width:100%"></textarea>
+        </div>
+      </div>
+
+      <!-- 右侧断言/变量/标签 -->
+      <aside class="detail-side">
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>断言配置</h3>
+            <button class="btn btn-ghost btn-sm" @click="apidetail.addAssertion()">+ 添加</button>
+          </div>
+          <ul class="assert-list">
+            <li v-for="(a,i) in apidetail.assertions" :key="i" class="editable"
+                :class="{'is-json': a.type==='JSON' || a.type==='状态码'}">
+              <select class="e-type" v-model="a.type" @change="apidetail.onAssertTypeChange(a)">
+                <option v-for="t in apidetail.assertTypes" :key="t.cls" :value="t.type">{{ t.type }}</option>
+              </select>
+              <input v-if="a.type==='JSON' || a.type==='状态码'" class="e-path" v-model="a.path"
+                     :placeholder="a.type==='状态码' ? 'data.code(留空=HTTP状态码)' : 'data.name'" />
+              <select class="e-op" v-model="a.op">
+                <option v-for="o in apidetail.opsOf(a)" :key="o[1]" :value="o[1]">{{ o[0] }}</option>
+              </select>
+              <input class="e-value" v-model="a.value"
+                     :placeholder="a.type==='JSON' ? '期望值,支持 {{变量}}' : '期望值,如 200'" />
+              <button class="icon-btn" @click="apidetail.rmAssertion(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="apidetail.assertions.length===0" class="empty-hint">暂无断言,点 + 添加</li>
+          </ul>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>变量配置</h3>
+            <button class="btn btn-ghost btn-sm" @click="apidetail.addVar()">+ 添加</button>
+          </div>
+          <ul class="var-list">
+            <li v-for="(v,i) in apidetail.vars" :key="i" class="editable">
+              <input class="e-key"  v-model="v.key"  placeholder="user_id" />
+              <input class="e-hint" v-model="v.hint" placeholder="说明" />
+              <button class="icon-btn" @click="apidetail.rmVar(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="apidetail.vars.length===0" class="empty-hint">暂无变量,点 + 添加</li>
+          </ul>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>提取变量</h3>
+            <button class="btn btn-ghost btn-sm" @click="apidetail.addExtract()">+ 添加</button>
+          </div>
+          <p class="muted" style="font-size:12px;margin:0 0 8px">
+            从上一个接口的响应中提取值存为变量,供后续用例引用(表达式支持 JSONPath,如 $.data.token)
+          </p>
+          <ul class="var-list">
+            <li v-for="(e,i) in apidetail.extracts" :key="i" class="editable">
+              <input class="e-key"  v-model="e.name" placeholder="变量名,如 token" />
+              <input class="e-hint" v-model="e.expr" placeholder="提取表达式,如 $.data.token" />
+              <button class="icon-btn" @click="apidetail.rmExtract(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="apidetail.extracts.length===0" class="empty-hint">暂无提取规则,点 + 添加</li>
+          </ul>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>标签</h3>
+          </div>
+          <div class="tag-list">
+            <span v-for="t in apidetail.tags" :key="t.text" class="tag-chip tag-core" @click="apidetail.rmTag(t.text)" style="cursor:pointer">
+              {{ t.text }} <i class="layui-icon layui-icon-close-fill"></i>
+            </span>
+            <span v-if="apidetail.tags.length===0" class="muted" style="font-size:12px">暂无标签</span>
+          </div>
+          <div class="tag-input-row">
+            <input id="apidetail-tag-input" placeholder="输入标签后回车(回车自动添加)" @keydown.enter.prevent="apidetail.tagInput($event)" />
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 状态条(toast,与新建用例页一致) -->
+    <div v-if="apidetail.status==='ok'"    class="toast is-ok">
+      <i class="layui-icon layui-icon-ok-circle toast__icon"></i>
+      {{ apidetail.message }}
+      <i class="layui-icon layui-icon-close toast__close" @click="apidetail.status='idle'"></i>
+    </div>
+    <div v-else-if="apidetail.status==='error'" class="toast is-error">
+      <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+      {{ apidetail.message }}
+      <i class="layui-icon layui-icon-close toast__close" @click="apidetail.status='idle'"></i>
+    </div>
+    <div v-else-if="apidetail.status==='saving'" class="toast is-info">
+      <i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop toast__icon"></i>
+      {{ apidetail.message }}
+    </div>
+  </section>
+
+  <!-- 3b. 新建用例 ============================================ -->
+  <section v-show="route==='apicases-new'" class="pomelo-page">
+    <div class="breadcrumb">
+      <a href="javascript:;" @click="newcase.requestLeave('#/apicases')">返回用例列表</a>
+      <span class="bc-sep">/</span>
+      <span class="bc-cur">新建用例</span>
+    </div>
+
+    <!-- 顶部操作条 + Toast -->
+    <div class="detail-head">
+      <div class="detail-head__title">
+        <h1>新建接口用例</h1>
+        <div class="detail-head__tags">
+          <span class="muted">填写后保存到 <code>data/cases/</code> 目录</span>
+        </div>
+      </div>
+      <div class="detail-head__actions">
+        <button class="btn btn-ghost" @click="newcase.requestLeave('#/apicases')" :disabled="newcase.saving">取消</button>
+        <button class="btn btn-primary" @click="newcase.save()" :disabled="newcase.saving">
+          <i class="layui-icon layui-icon-ok-circle"></i>
+          {{ newcase.saving ? '保存中...' : '保存用例' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 状态条(toast) -->
+    <div v-if="newcase.status==='ok'"    class="toast is-ok">
+      <i class="layui-icon layui-icon-ok-circle toast__icon"></i>
+      <span>{{ newcase.message }}</span>
+      <span class="muted">1.5s 后自动返回列表</span>
+      <i class="layui-icon layui-icon-close toast__close" @click="newcase.status='idle'"></i>
+    </div>
+    <div v-else-if="newcase.status==='error'" class="toast is-error">
+      <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+      <span>{{ newcase.message }}</span>
+      <i class="layui-icon layui-icon-close toast__close" @click="newcase.status='idle'"></i>
+    </div>
+    <div v-else-if="newcase.status==='saving'" class="toast is-info">
+      <i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop toast__icon"></i>
+      <span>{{ newcase.message }}</span>
+    </div>
+
+    <div class="detail-grid detail-grid--wide">
+      <!-- 左主列 -->
+      <div class="detail-main">
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求配置</h3>
+            <div class="state-switch state-switch--lg" title="用例状态">
+              <button :class="{'is-active': newcase.form.state==='on'}"
+                      @click="newcase.form.state='on'; newcase.markDirty()">已启用</button>
+              <button :class="{'is-active': newcase.form.state==='off'}"
+                      @click="newcase.form.state='off'; newcase.markDirty()">已停用</button>
+            </div>
+          </div>
+          <div class="form-grid">
+            <label class="form-row">
+              <span>用例名称 <em style="color:#ef4444">*</em></span>
+              <input type="text" v-model="newcase.form.name" @input="newcase.markDirty()" placeholder="例:获取用户信息" />
+            </label>
+            <label class="form-row">
+              <span>所属项目</span>
+              <select v-model="newcase.form.project" @change="newcase.markDirty()">
+                <option value="" v-if="newcase.projects.length===0" disabled>暂无项目,请先新建模块</option>
+                <option v-for="p in newcase.projects" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </label>
+            <label class="form-row">
+              <span>协议模式</span>
+              <div class="state-switch state-switch--lg" title="用例协议">
+                <button :class="{'is-active': newcase.form.protocol==='socket'}"
+                        @click="newcase.form.protocol='socket'; newcase.markDirty()">Socket</button>
+                <button :class="{'is-active': newcase.form.protocol==='http'}"
+                        @click="newcase.form.protocol='http'; newcase.markDirty()">HTTP</button>
+              </div>
+            </label>
+            <label class="form-row form-row--full">
+              <span>接口路径 <em style="color:#ef4444">*</em></span>
+              <div class="input-group" :class="newcase.pathSoloCls">
+                <!-- socket 模式没有请求方法,方法下拉只在 http 模式出现 -->
+                <select v-if="newcase.form.protocol==='http'" v-model="newcase.form.method" @change="newcase.markDirty()">
+                  <option v-for="m in newcase.methods" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <input type="text" v-model="newcase.form.path" @input="newcase.markDirty()" :placeholder="newcase.pathPlaceholder" />
+              </div>
+            </label>
+            <label class="form-row form-row--full">
+              <span>用例描述</span>
+              <textarea v-model="newcase.form.desc" @input="newcase.markDirty()"
+                placeholder="描述这个用例要验证什么,方便以后维护"></textarea>
+            </label>
+          </div>
+        </div>
+
+        <!-- 请求 Headers -->
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求 Headers</h3>
+            <button class="btn btn-ghost btn-sm" @click="newcase.addHeader()">+ 添加</button>
+          </div>
+          <table class="kv-table">
+            <thead><tr><th style="width:32%">Key</th><th>Value</th><th style="width:60px"></th></tr></thead>
+            <tbody>
+              <tr v-for="(h,i) in newcase.headers" :key="i">
+                <td><input v-model="h.key"   @input="newcase.markDirty()" placeholder="Content-Type" /></td>
+                <td><input v-model="h.value" @input="newcase.markDirty()" placeholder="application/json" /></td>
+                <td><button class="icon-btn" @click="newcase.removeHeader(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button></td>
+              </tr>
+              <tr v-if="newcase.headers.length===0">
+                <td colspan="3" class="is-empty">暂无 Header,点 + 添加</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 查询参数 Params -->
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>查询参数 Params</h3>
+            <button class="btn btn-ghost btn-sm" @click="newcase.addParam()">+ 添加</button>
+          </div>
+          <table class="kv-table">
+            <thead><tr><th style="width:32%">Key</th><th>Value</th><th style="width:60px"></th></tr></thead>
+            <tbody>
+              <tr v-for="(p,i) in newcase.params" :key="i">
+                <td><input v-model="p.key"   @input="newcase.markDirty()" placeholder="include" /></td>
+                <td><input v-model="p.value" @input="newcase.markDirty()" placeholder="profile,address" /></td>
+                <td><button class="icon-btn" @click="newcase.removeParam(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button></td>
+              </tr>
+              <tr v-if="newcase.params.length===0">
+                <td colspan="3" class="is-empty">暂无查询参数,点 + 添加</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 请求 Body -->
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>请求 Body</h3>
+            <div class="body-tabs">
+              <button :class="{'is-active':newcase.bodyTab==='json'}" @click="newcase.bodyTab='json'; newcase.markDirty()">JSON</button>
+              <button :class="{'is-active':newcase.bodyTab==='form'}" @click="newcase.bodyTab='form'; newcase.markDirty()">Form</button>
+              <button :class="{'is-active':newcase.bodyTab==='raw'}"  @click="newcase.bodyTab='raw';  newcase.markDirty()">Raw</button>
+              <button class="body-check" @click="newcase.validateBodyJson()">校验 JSON</button>
+            </div>
+          </div>
+          <textarea v-model="newcase.bodyJson" @input="newcase.markDirty(); newcase.jsonCheckMsg=''"
+            class="json-editor"
+            placeholder='{"id": "{{user_id}}", "include": ["profile", "address"]}'></textarea>
+          <div v-if="newcase.jsonCheckMsg" class="json-check-tip"
+               :class="newcase.jsonCheckOk ? 'is-ok' : 'is-bad'">{{ newcase.jsonCheckMsg }}</div>
+        </div>
+      </div>
+
+      <!-- 右侧断言 / 变量 / 标签 -->
+      <aside class="detail-side">
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>断言配置</h3>
+            <button class="btn btn-ghost btn-sm" @click="newcase.addAssertion()">+ 添加</button>
+          </div>
+          <ul class="assert-list">
+            <li v-for="(a,i) in newcase.assertions" :key="i" class="editable"
+                :class="{'is-json': a.type==='JSON' || a.type==='状态码'}">
+              <select class="e-type" v-model="a.type" @change="newcase.onAssertTypeChange(a)">
+                <option v-for="t in newcase.assertTypes" :key="t.cls" :value="t.type">{{ t.type }}</option>
+              </select>
+              <input v-if="a.type==='JSON' || a.type==='状态码'" class="e-path" v-model="a.path"
+                     :placeholder="a.type==='状态码' ? 'data.code(留空=HTTP状态码)' : 'data.name'"
+                     @input="newcase.markDirty()" />
+              <select class="e-op" v-model="a.op" @change="newcase.markDirty()">
+                <option v-for="o in newcase.opsOf(a)" :key="o[1]" :value="o[1]">{{ o[0] }}</option>
+              </select>
+              <input class="e-value" v-model="a.value" @input="newcase.markDirty()"
+                     :placeholder="a.type==='JSON' ? '期望值,支持 {{变量}}' : '期望值,如 200'" />
+              <button class="icon-btn" @click="newcase.removeAssertion(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="newcase.assertions.length===0" class="empty-hint">暂无断言,点 + 添加</li>
+          </ul>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>变量配置</h3>
+            <button class="btn btn-ghost btn-sm" @click="newcase.addVar()">+ 添加</button>
+          </div>
+          <ul class="var-list">
+            <li v-for="(v,i) in newcase.vars" :key="i" class="editable">
+              <input class="e-key"  v-model="v.key"  @input="newcase.markDirty()" placeholder="user_id" />
+              <input class="e-hint" v-model="v.hint" @input="newcase.markDirty()" placeholder="说明(如:从登录接口中提取)" />
+              <button class="icon-btn" @click="newcase.removeVar(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="newcase.vars.length===0" class="empty-hint">暂无变量,点 + 添加</li>
+          </ul>
+        </div>
+
+        <!-- 提取变量:从上一个接口的响应中提取值,供后续用例引用 -->
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>提取变量</h3>
+            <button class="btn btn-ghost btn-sm" @click="newcase.addExtract()">+ 添加</button>
+          </div>
+          <p class="muted" style="font-size:12px;margin:0 0 8px">
+            从上一个接口的响应中提取值存为变量,供后续用例引用(表达式支持 JSONPath,如 $.data.token)
+          </p>
+          <ul class="var-list">
+            <li v-for="(e,i) in newcase.extracts" :key="i" class="editable">
+              <input class="e-key"  v-model="e.name" @input="newcase.markDirty()" placeholder="变量名,如 token" />
+              <input class="e-hint" v-model="e.expr" @input="newcase.markDirty()" placeholder="提取表达式,如 $.data.token" />
+              <button class="icon-btn" @click="newcase.removeExtract(i)" title="删除"><i class="layui-icon layui-icon-delete"></i></button>
+            </li>
+            <li v-if="newcase.extracts.length===0" class="empty-hint">暂无提取规则,点 + 添加</li>
+          </ul>
+        </div>
+
+        <div class="card section-card">
+          <div class="card__header">
+            <h3>标签</h3>
+          </div>
+          <div class="tag-list">
+            <span v-for="t in newcase.form.tags" :key="t" class="tag-chip tag-core" @click="newcase.removeTag(t)" style="cursor:pointer">
+              {{ t }} <i class="layui-icon layui-icon-close-fill"></i>
+            </span>
+            <span v-if="newcase.form.tags.length===0" class="muted" style="font-size:12px">暂无标签</span>
+          </div>
+          <div class="tag-input-row">
+            <input id="newcase-tag-input" placeholder="输入标签后回车(回车自动添加)" @keydown.enter.prevent="newcase.tagInput($event)" />
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 放弃改动 确认弹窗 -->
+    <div v-if="newcase.confirmLeave" class="modal-mask" @click.self="newcase.confirmLeaveNo()">
+      <div class="modal">
+        <h3>放弃新建的用例?</h3>
+        <p>当前表单有未保存的改动,直接返回会丢失。确定要放弃吗?</p>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="newcase.confirmLeaveNo()">继续编辑</button>
+          <button class="btn btn-primary btn-sm" @click="newcase.confirmLeaveYes()">放弃并返回</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. 测试执行 ============================================ -->
+  <section v-show="route==='testrun'" class="pomelo-page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">测试执行</h1>
+        <p class="page-desc">选择测试套件执行接口测试,生成 Allure 测试报告</p>
+      </div>
+      <div class="page-head__actions">
+        <button class="btn btn-ghost" @click="goTo('#/testrun-new-suite')">
+          <i class="layui-icon layui-icon-add-circle"></i> 新建套件</button>
+        <!-- 执行跟踪:调 Python 执行引擎;执行中变「停止」 -->
+        <button v-if="!testrun.running" class="btn btn-primary"
+          :disabled="!testrun.activeFile" @click="testrun.runSuite()">
+          <i class="layui-icon layui-icon-play"></i> 执行跟踪</button>
+        <button v-else class="btn btn-primary" style="background:var(--c-danger)"
+          @click="testrun.stopRun()">
+          <i class="layui-icon layui-icon-pause"></i> 停止执行</button>
+      </div>
+    </div>
+
+    <div class="run-grid">
+      <!-- 左:套件列表(只显示测试套件,用例在套件内由引擎执行) -->
+      <div class="card suite-card">
+        <div class="suite-card__head">
+          <h3>测试套件 <span class="muted small">共 {{ testrun.suiteCount }} 个测试套件</span></h3>
+          <div class="search-input search-input--sm">
+            <i class="layui-icon layui-icon-search"></i>
+            <input placeholder="搜索套件..." v-model="testrun.keyword" />
+          </div>
+        </div>
+        <ul class="suite-list">
+          <li v-for="s in testrun.filteredSuites" :key="s.file"
+              :class="{'is-active': testrun.activeFile===s.file}"
+              @click="testrun.selectSuite(s.file)">
+            <span class="suite-list__icon" :class="'si-'+s.iconCls">
+              <i :class="s.icon"></i>
+            </span>
+            <div class="suite-list__main">
+              <div class="suite-list__name">{{ s.name }}</div>
+              <div class="suite-list__meta">
+                {{ s.cases }} 个用例 · {{ s.module }} · {{ s.elapsed }}
+              </div>
+            </div>
+            <span class="suite-acts">
+              <span class="suite-act" title="查看套件"
+                @click.stop="goTo('#/testrun-suite-view/' + encodeURIComponent(s.file))">
+                <i class="layui-icon layui-icon-search"></i>
+              </span>
+              <span class="suite-act suite-act--edit" title="编辑套件"
+                @click.stop="goTo('#/testrun-suite-edit/' + encodeURIComponent(s.file))">
+                <i class="layui-icon layui-icon-edit"></i>
+              </span>
+              <span class="suite-act suite-act--del" title="删除套件"
+                @click.stop="testrun.removeSuite(s.file)">×</span>
+            </span>
+            <span class="state-tag" :class="'is-'+s.state">
+              {{ s.stateLabel }}
+            </span>
+          </li>
+          <li v-if="testrun.filteredSuites.length===0" style="cursor:default;justify-content:center;color:var(--c-muted)">
+            <span>暂无测试套件,点右上角「新建套件」创建</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 右:执行配置 + 进度 + 日志 -->
+      <div class="run-right">
+
+        <div class="card runconfig">
+          <div class="card__header">
+            <h3>执行配置</h3>
+            <a href="javascript:;" class="card__more">{{ testrun.activeName }}</a>
+          </div>
+
+          <div class="runconfig__row">
+            <span class="rl">执行环境</span>
+            <div class="rr">
+              <button v-for="e in testrun.envs" :key="e.key"
+                      class="env-chip"
+                      :class="{'is-active':testrun.env===e.key}"
+                      :style="{color: testrun.env===e.key ? e.color : '', borderColor: testrun.env===e.key ? e.color : ''}"
+                      @click="testrun.env=e.key">
+                <i class="dot" :style="{background:e.color}"></i> {{ e.label }}
+                <span class="env-edit" title="修改该环境"
+                      @click.stop="testrun.editEnv(e.key)">
+                  <i class="layui-icon layui-icon-edit"></i>
+                </span>
+                <span class="env-del" title="删除该环境"
+                      @click.stop="testrun.removeEnv(e.key)">×</span>
+              </button>
+              <!-- 环境可配置:新增环境持久化到 data/config/envs.json -->
+              <button class="btn btn-ghost btn-sm" title="新增执行环境" @click="testrun.addEnv()">+ 环境</button>
+            </div>
+          </div>
+
+          <!-- 并发数:当前固定 1,该行先隐藏;引擎按套件顺序串行执行 -->
+
+          <div class="runconfig__row">
+            <span class="rl">失败重试</span>
+            <div class="rr">
+              <button v-for="r in testrun.retries" :key="r.value"
+                      :class="{'is-active':testrun.retry===r.value}"
+                      @click="testrun.retry=r.value">{{ r.label }}</button>
+            </div>
+          </div>
+
+          <div class="runconfig__row">
+            <span class="rl">超时时间</span>
+            <div class="rr">
+              <button v-for="t in testrun.timeouts" :key="t.value"
+                      :class="{'is-active':testrun.timeout===t.value}"
+                      @click="testrun.timeout=t.value">{{ t.label }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card progress-card">
+          <div class="card__header">
+            <h3>执行进度</h3>
+            <span v-if="testrun.running" class="dot-running"><i class="dot"></i> 执行中</span>
+            <span v-else class="muted small">{{ testrun.statusText }}</span>
+          </div>
+
+          <div class="progress-meta">
+            <span>已完成 {{ testrun.progress.done }} / {{ testrun.progress.total }} 用例</span>
+            <span class="prog-percent">{{ testrun.progress.percent }}%</span>
+          </div>
+
+          <div class="layui-progress layui-progress-big" lay-showpercent="true">
+            <div class="layui-progress-bar" :style="{width:testrun.progress.percent+'%'}"></div>
+          </div>
+
+          <div class="run-stat-row">
+            <div class="run-stat ok"><strong>{{ testrun.progress.passed }}</strong> 通过</div>
+            <div class="run-stat fail"><strong>{{ testrun.progress.failed }}</strong> 失败</div>
+            <div class="run-stat skip"><strong>{{ testrun.progress.skipped }}</strong> 跳过</div>
+            <div class="run-stat time"><strong>{{ testrun.progress.duration }}</strong> 已耗时</div>
+          </div>
+
+          <div class="terminal">
+            <div class="terminal__bar">
+              <span class="dot dot-red"></span><span class="dot dot-orange"></span><span class="dot dot-green"></span>
+              <em>execution.log</em>
+            </div>
+            <pre class="terminal__body">{{ testrun.logText() }}</pre>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- 4b. 新建套件 ============================================ -->
+  <section v-show="route==='testrun-new-suite'" class="pomelo-page"
+    :class="{'page-readonly': newsuite.readonly}">
+    <div class="breadcrumb">
+      <a href="javascript:;" @click="newsuite.requestLeave('#/testrun')">返回测试执行</a>
+      <span class="bc-sep">/</span>
+      <span class="bc-cur">{{ newsuite.modeLabel }}</span>
+    </div>
+
+    <div class="detail-head">
+      <div class="detail-head__title">
+        <h1>{{ newsuite.modeTitle }}</h1>
+        <div class="detail-head__tags">
+          <span class="muted" v-if="newsuite.mode==='create'">保存到 <code>data/suites/</code> 目录</span>
+          <span class="muted" v-else>套件文件 <code>{{ newsuite.editFile }}</code>.json</span>
+        </div>
+      </div>
+      <div class="detail-head__actions">
+        <button class="btn btn-ghost" @click="newsuite.requestLeave('#/testrun')" :disabled="newsuite.saving">取消</button>
+        <button v-if="newsuite.mode==='view'" class="btn btn-primary"
+          @click="goTo('#/testrun-suite-edit/' + encodeURIComponent(newsuite.editFile))">
+          <i class="layui-icon layui-icon-edit"></i> 去编辑</button>
+        <button v-else class="btn btn-primary" @click="newsuite.save()" :disabled="newsuite.saving">
+          <i class="layui-icon layui-icon-ok-circle"></i>
+          {{ newsuite.saving ? '保存中...' : '保存套件' }}
+        </button>
+      </div>
+    </div>
+
+    <div v-if="newsuite.status==='ok'"    class="toast is-ok">
+      <i class="layui-icon layui-icon-ok-circle toast__icon"></i>
+      <span>{{ newsuite.message }}</span>
+      <span class="muted">1.5s 后自动返回</span>
+    </div>
+    <div v-else-if="newsuite.status==='error'" class="toast is-error">
+      <i class="layui-icon layui-icon-close-fill toast__icon"></i>
+      <span>{{ newsuite.message }}</span>
+    </div>
+    <div v-else-if="newsuite.status==='saving'" class="toast is-info">
+      <i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop toast__icon"></i>
+      <span>{{ newsuite.message }}</span>
+    </div>
+
+    <div class="run-grid" style="grid-template-columns: 1.1fr 1fr;">
+      <!-- 左:基础信息 -->
+      <div class="card section-card">
+        <div class="card__header"><h3>套件信息</h3></div>
+        <div class="form-grid">
+          <label class="form-row form-row--full">
+            <span>套件名称 <em style="color:#ef4444">*</em></span>
+            <input type="text" v-model="newsuite.form.name" @input="newsuite.markDirty()"
+              placeholder="例:用户服务全量回归" />
+          </label>
+          <label class="form-row">
+            <span>所属项目</span>
+            <select v-model="newsuite.form.project" @change="newsuite.markDirty()">
+              <option v-for="p in newsuite.projects" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+          <label class="form-row">
+            <span>已选用例数</span>
+            <input type="text" :value="newsuite.form.caseIds.length + ' 个'" readonly
+              style="background: var(--c-bg); color: var(--c-muted);" />
+          </label>
+        </div>
+      </div>
+
+      <!-- 右:执行配置 -->
+      <div class="card section-card">
+        <div class="card__header"><h3>执行配置</h3></div>
+        <div class="runconfig__row">
+          <span class="rl">执行环境</span>
+          <div class="rr">
+            <button v-for="e in newsuite.envs" :key="e.key"
+              :class="{'is-active': newsuite.form.env===e.key}"
+              :style="newsuite.form.env===e.key ? {color:e.color, borderColor:e.color} : {}"
+              @click="newsuite.form.env=e.key; newsuite.markDirty()">
+              <i class="dot" :style="{background:e.color}"></i> {{ e.label }}
+            </button>
+          </div>
+        </div>
+        <!-- 并发数:固定 1,与执行页一致,不提供修改入口 -->
+        <div class="runconfig__row">
+          <span class="rl">失败重试</span>
+          <div class="rr">
+            <button v-for="r in newsuite.retries" :key="r.value"
+              :class="{'is-active': newsuite.form.retry===r.value}"
+              @click="newsuite.form.retry=r.value; newsuite.markDirty()">{{ r.label }}</button>
+          </div>
+        </div>
+        <div class="runconfig__row">
+          <span class="rl">超时时间</span>
+          <div class="rr">
+            <button v-for="t in newsuite.timeouts" :key="t.value"
+              :class="{'is-active': newsuite.form.timeout===t.value}"
+              @click="newsuite.form.timeout=t.value; newsuite.markDirty()">{{ t.label }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 用例多选(整行) -->
+      <div class="card section-card" style="grid-column: 1 / -1;">
+        <div class="card__header">
+          <h3>选择用例 <span class="muted small">已选 {{ newsuite.form.caseIds.length }} 个 · 执行顺序见下方「执行顺序」列表</span></h3>
+          <div>
+            <button class="btn btn-ghost btn-sm" @click="
+              newsuite.form.caseIds = newsuite.candidateCases.map(c => c.id);
+              newsuite.markDirty();
+            ">全选</button>
+            <button class="btn btn-ghost btn-sm" style="margin-left:6px" @click="
+              newsuite.form.caseIds = []; newsuite.markDirty();
+            ">清空</button>
+          </div>
+        </div>
+        <table class="layui-table pomelo-table">
+          <thead>
+            <tr>
+              <th style="width:40px"></th>
+              <th style="width:60px">ID</th>
+              <th>用例名称</th>
+              <th style="width:70px">方法</th>
+              <th>接口路径</th>
+              <th style="width:100px">项目</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in newsuite.candidateCases" :key="c.id"
+              :style="{background: newsuite.isCaseSelected(c.id) ? '#f0f4ff' : '', cursor:'pointer'}"
+              @click="newsuite.toggleCase(c.id)">
+              <td>
+                <input type="checkbox" :checked="newsuite.isCaseSelected(c.id)"
+                  @click.stop="newsuite.toggleCase(c.id)" />
+              </td>
+              <td>{{ c.id }}</td>
+              <td>{{ c.name }}</td>
+              <td><span class="method-tag" :class="'m-'+c.method.toLowerCase()">{{ c.method }}</span></td>
+              <td class="api-path">{{ c.path }}</td>
+              <td class="muted">{{ c.project }}</td>
+            </tr>
+            <tr v-if="newsuite.candidateCases.length===0">
+              <td colspan="6" class="is-empty">暂无用例,请先在「接口用例」里创建</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- 已选用例执行顺序(从上到下依次执行) -->
+        <div v-if="newsuite.selectedCases.length" class="order-panel" :class="{'page-readonly': newsuite.readonly}">
+          <div class="order-panel__title">
+            执行顺序 <span class="muted small">从上到下依次执行,↑↓ 调整,× 移除</span>
+          </div>
+          <table class="layui-table pomelo-table order-table">
+            <thead>
+              <tr>
+                <th style="width:64px">顺序</th>
+                <th>用例名称</th>
+                <th style="width:80px">方法</th>
+                <th>接口路径</th>
+                <th style="width:170px" v-if="!newsuite.readonly">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(c, i) in newsuite.selectedCases" :key="c.id">
+                <td><span class="order-badge">{{ i + 1 }}</span></td>
+                <td>{{ c.name }}</td>
+                <td><span class="method-tag" :class="'m-'+c.method.toLowerCase()">{{ c.method }}</span></td>
+                <td class="api-path">{{ c.path }}</td>
+                <td v-if="!newsuite.readonly" class="order-ops">
+                  <button class="order-btn" title="上移" :disabled="i === 0"
+                    @click="newsuite.moveCase(c.id, -1)">↑</button>
+                  <button class="order-btn" title="下移" :disabled="i === newsuite.selectedCases.length - 1"
+                    @click="newsuite.moveCase(c.id, 1)">↓</button>
+                  <button class="order-btn order-btn--del" title="移除"
+                    @click="newsuite.removeCase(c.id)">×</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 放弃确认 -->
+    <div v-if="newsuite.confirmLeave" class="modal-mask" @click.self="newsuite.confirmLeaveNo()">
+      <div class="modal">
+        <h3>放弃新建的套件?</h3>
+        <p>当前表单有未保存的改动,直接返回会丢失。确定要放弃吗?</p>
+        <div class="modal__actions">
+          <button class="btn btn-ghost btn-sm" @click="newsuite.confirmLeaveNo()">继续编辑</button>
+          <button class="btn btn-primary btn-sm" @click="newsuite.confirmLeaveYes()">放弃并返回</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. 测试报告 ============================================ -->
+  <section v-show="route==='reports'" class="pomelo-page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Allure 测试报告</h1>
+        <p class="page-desc">查看所有测试执行的 Allure 报告,分析测试结果</p>
+      </div>
+      <div class="page-head__actions">
+        <button class="btn btn-primary" @click="reports.openAllureReport()">
+          <i class="layui-icon layui-icon-link"></i> 查看 Allure 报告
+        </button>
+        <button class="btn btn-ghost" @click="reports.openAllureDir()">
+          <i class="layui-icon layui-icon-download-circle"></i> 结果目录
+        </button>
+      </div>
+    </div>
+
+    <!-- 4 统计卡 -->
+    <div class="report-stat">
+      <div class="report-stat__item">
+        <div class="r-icon r-icon--blue"><i class="layui-icon layui-icon-form"></i></div>
+        <span class="chip-new">最新推荐</span>
+        <div class="r-label">总用例数</div>
+        <div class="r-value">{{ reports.summary.total }}</div>
+        <div class="r-sub muted">用户服务全量回归</div>
+      </div>
+      <div class="report-stat__item">
+        <div class="r-icon r-icon--green"><i class="layui-icon layui-icon-ok-circle"></i></div>
+        <span class="chip-new">{{ reports.summary.passRate }}%</span>
+        <div class="r-label">通过用例</div>
+        <div class="r-value">{{ reports.summary.passed }}</div>
+        <div class="r-sub muted">全部通过 1</div>
+      </div>
+      <div class="report-stat__item">
+        <div class="r-icon r-icon--red"><i class="layui-icon layui-icon-close-fill"></i></div>
+        <span class="chip-new">{{ reports.summary.failRate }}%</span>
+        <div class="r-label">失败用例</div>
+        <div class="r-value">{{ reports.summary.failed }}</div>
+        <div class="r-sub muted">需要关注</div>
+      </div>
+      <div class="report-stat__item">
+        <div class="r-icon r-icon--orange"><i class="layui-icon layui-icon-time"></i></div>
+        <div class="r-label">总执行耗时</div>
+        <div class="r-value">{{ reports.summary.duration }}</div>
+        <div class="r-sub muted">最新一次套件执行</div>
+      </div>
+    </div>
+
+    <!-- 中部三栏 -->
+    <div class="dash-row">
+      <div class="card chart-card">
+        <div class="card__header">
+          <h3>执行结果分布</h3>
+          <p>本次测试执行结果统计</p>
+        </div>
+        <div class="chart chart--donut" id="reportDonut"></div>
+        <div class="donut-legend">
+          <span><i class="dot dot-green"></i> 通过 {{ reports.summary.passed }}</span>
+          <span><i class="dot dot-red"></i> 失败 {{ reports.summary.failed }}</span>
+          <span><i class="dot dot-orange"></i> 跳过 {{ reports.summary.skipped }}</span>
+        </div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="card__header">
+          <h3>执行耗时分布</h3>
+          <p>各用例耗时统计</p>
+        </div>
+        <div class="chart" id="durationChart"></div>
+        <div class="muted small" style="text-align:center;margin-top:8px">
+          基于最新一次执行的真实用例耗时
+        </div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="card__header">
+          <h3>失败用例分析</h3>
+          <p>需要关注的失败项</p>
+        </div>
+        <ul class="fail-list">
+          <li v-for="f in reports.failures" :key="f.id">
+            <span class="fail-x"><i class="layui-icon layui-icon-close"></i></span>
+            <div class="fail-main">
+              <div class="fail-name">{{ f.name }}</div>
+              <div class="fail-reason">{{ f.reason }}</div>
+            </div>
+            <button class="icon-btn"><i class="layui-icon layui-icon-log"></i></button>
+          </li>
+          <li v-if="reports.failures.length===0" style="justify-content:center;color:var(--c-muted)">
+            {{ reports.summary.total === 0 ? '还没有执行记录,先去「测试执行」跑一个套件' : '最新一次执行没有失败用例' }}
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 报告历史表 -->
+    <div class="card table-card">
+      <div class="card__header">
+        <div>
+          <h3>报告历史记录</h3>
+          <p>所有测试执行的 Allure 报告</p>
+        </div>
+        <select class="btn-select">
+          <option>全部类型</option>
+          <option>通过</option>
+          <option>失败</option>
+        </select>
+      </div>
+
+      <table class="layui-table pomelo-table">
+        <thead>
+          <tr>
+            <th>报告名称</th>
+            <th>测试件</th>
+            <th>执行结果</th>
+            <th>通过率</th>
+            <th>耗时</th>
+            <th>执行时间</th>
+            <th style="width:150px">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="h in reports.pagedHistory" :key="h.id" style="cursor:pointer"
+              @click="goTo('#/report-detail/' + h.reportNo)">
+            <td>
+              <span class="state-icon" :class="'is-'+h.stateIcon"></span>
+              {{ h.name }}
+            </td>
+            <td>{{ h.module }}</td>
+            <td>
+              <span class="state-tag" :class="'is-'+h.state">
+                <i class="dot" :class="'dot-'+h.dotCls"></i>
+                {{ h.stateLabel }}
+              </span>
+            </td>
+            <td>
+              <span class="rate" :class="h.rateCls">
+                {{ h.passRate }}%
+              </span>
+            </td>
+            <td>{{ h.duration }}</td>
+            <td class="muted">{{ h.executedAt }}</td>
+            <td @click.stop>
+              <button class="btn-mini" @click="goTo('#/report-detail/' + h.reportNo)">查看</button>
+              <button class="btn-mini" style="margin-left:6px"
+                      @click="reports.openAllureReport(h.reportNo)">Allure</button>
+            </td>
+          </tr>
+          <tr v-if="reports.history.length===0">
+            <td colspan="7" class="is-empty">暂无报告,执行套件后自动生成</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="pager" v-if="reports.total>reports.pageSize">
+        <span class="muted">共 {{ reports.pageInfo.total }} 条报告,当前显示第 {{ reports.pageInfo.from }}-{{ reports.pageInfo.to }} 条</span>
+        <div class="pager__pages">
+          <button class="page-btn" :disabled="reports.pageInfo.cur<=1"
+                  @click="reports.goPage(reports.pageInfo.cur-1)">
+            <i class="layui-icon layui-icon-left"></i>
+          </button>
+          <button v-for="pg in reports.pageInfo.pages" :key="pg.k"
+                  class="page-btn"
+                  :class="{'is-active': !pg.ell && reports.pageInfo.cur===pg.n}"
+                  :disabled="pg.ell"
+                  @click="pg.ell ? null : reports.goPage(pg.n)">{{ pg.label }}</button>
+          <button class="page-btn" :disabled="reports.pageInfo.cur>=reports.pageInfo.pageCount"
+                  @click="reports.goPage(reports.pageInfo.cur+1)">
+            <i class="layui-icon layui-icon-right"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. 用例执行详情 ============================================ -->
+  <section v-show="route==='report-detail'" class="pomelo-page">
+    <div class="breadcrumb">
+      <a href="javascript:;" @click="goTo('#/reports')">返回报告列表</a>
+      <span class="bc-sep">/</span>
+      <span class="bc-cur">{{ reportdetail.suite }} #{{ reportdetail.reportNo }}</span>
+    </div>
+
+    <div class="detail-head">
+      <div class="detail-head__title">
+        <h1>{{ reportdetail.suite }} #{{ reportdetail.reportNo }}
+          <span class="state-tag" :class="reportdetail.failedCount ? 'is-fail' : 'is-pass'">
+            {{ reportdetail.overallLabel }}</span></h1>
+        <p class="muted small">执行时间:{{ reportdetail.executedAt }} · 执行环境:{{ reportdetail.envLabel }}</p>
+      </div>
+      <div class="detail-head__actions">
+        <button class="btn btn-ghost" @click="reportdetail.load()"><i class="layui-icon layui-icon-refresh"></i> 刷新</button>
+      </div>
+    </div>
+
+    <!-- 5 统计卡 -->
+    <div class="r5-grid">
+      <div class="r5-item"><span class="r-icon r-icon--blue"><i class="layui-icon layui-icon-form"></i></span><div><strong>{{ reportdetail.stats.total }}</strong><em>总用例</em></div></div>
+      <div class="r5-item"><span class="r-icon r-icon--green"><i class="layui-icon layui-icon-ok-circle"></i></span><div><strong class="ok">{{ reportdetail.stats.passed }}</strong><em>通过</em></div></div>
+      <div class="r5-item"><span class="r-icon r-icon--red"><i class="layui-icon layui-icon-close-fill"></i></span><div><strong class="fail">{{ reportdetail.stats.failed }}</strong><em>失败</em></div></div>
+      <div class="r5-item"><span class="r-icon r-icon--orange"><i class="layui-icon layui-icon-pause"></i></span><div><strong class="warn">{{ reportdetail.stats.skipped }}</strong><em>跳过</em></div></div>
+      <div class="r5-item"><span class="r-icon r-icon--purple"><i class="layui-icon layui-icon-time"></i></span><div><strong>{{ reportdetail.stats.duration }}</strong><em>总耗时</em></div></div>
+    </div>
+
+    <div class="detail-grid">
+      <!-- 左:用例执行详情表 -->
+      <div class="card section-card detail-main">
+        <div class="card__header">
+          <h3>用例执行详情</h3>
+          <p>所有用例的执行状态和详细信息</p>
+        </div>
+        <div class="filter-row">
+          <div class="search-input search-input--sm">
+            <i class="layui-icon layui-icon-search"></i>
+            <input placeholder="搜索用例..." />
+          </div>
+          <div class="filter-pills">
+            <button v-for="f in reportdetail.filters" :key="f.key"
+                    :class="{'is-active': reportdetail.activeFilter===f.key}"
+                    @click="reportdetail.activeFilter=f.key">
+              {{ f.label }}
+            </button>
+          </div>
+        </div>
+
+        <table class="layui-table pomelo-table">
+          <thead>
+            <tr>
+              <th>用例名称</th>
+              <th>状态</th>
+              <th>耗时</th>
+              <th>接口</th>
+              <th>失败原因</th>
+              <th style="width:60px">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in reportdetail.filteredCases" :key="c.id"
+                :class="{'is-active': reportdetail.activeCase===c.id}"
+                @click="reportdetail.openCase(c.id)">
+              <td>{{ c.name }}</td>
+              <td>
+                <span class="state-tag" :class="'is-'+c.state">
+                  <i class="dot" :class="'dot-'+c.dotCls"></i>
+                  {{ c.stateLabel }}
+                </span>
+              </td>
+              <td>{{ c.duration }}</td>
+              <td class="api-path">{{ c.path }}</td>
+              <td class="muted">{{ c.reason }}</td>
+              <td><button class="icon-btn"><i class="layui-icon layui-icon-eye"></i></button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 右:用例执行详情抽屉 -->
+      <aside class="drawer-panel" v-show="reportdetail.caseOpen">
+        <div class="drawer-panel__head">
+          <h3>用例执行详情</h3>
+          <button class="icon-btn" @click="reportdetail.closeCase()">
+            <i class="layui-icon layui-icon-close"></i>
+          </button>
+        </div>
+
+        <div class="case-detail">
+          <div class="case-detail__head">
+            <div class="case-detail__title">{{ reportdetail.current.name }}</div>
+            <span class="state-tag" :class="'is-'+reportdetail.current.state">
+              <i class="dot" :class="'dot-'+reportdetail.current.dotCls"></i>
+              {{ reportdetail.current.stateLabel }}</span>
+          </div>
+
+          <ul class="case-meta">
+            <li><i class="layui-icon layui-icon-link"></i> {{ reportdetail.current.path }}</li>
+            <li><i class="layui-icon layui-icon-time"></i> 耗时 {{ reportdetail.current.duration }}</li>
+            <li><i class="layui-icon layui-icon-date"></i> {{ reportdetail.executedAt }}</li>
+          </ul>
+
+          <h4 class="case-section-title" :class="{'fail-title': reportdetail.current.state==='fail'}">
+            {{ reportdetail.current.state==='fail' ? '失败原因' : '执行信息' }}</h4>
+          <div class="case-reason">
+            <div><strong>{{ reportdetail.current.state==='fail' ? '失败信息:' : '执行结果:' }}</strong>
+              {{ reportdetail.current.reason }}</div>
+          </div>
+
+          <template v-if="reportdetail.currentHeaders.length">
+            <h4 class="case-section-title">请求信息</h4>
+            <div class="kv-table-mini">
+              <div class="kvm-row"><span>请求 Headers</span></div>
+              <div v-for="h in reportdetail.currentHeaders" :key="h.key" class="kvm-line">
+                <em>{{ h.key }}:</em><span>{{ h.value }}</span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+</main>
+
+<!-- ======================== 脚本 ======================== -->
+<!-- ECharts 5(本地) -->
+<script src="vendor/echarts.min.js"></script>
+<!-- layui 2.x JS(本地;图标 CSS class 已随 layui.css 加载) -->
+<script src="vendor/layui/layui.js"></script>
+<!-- petite-vue 0.4 轻量级响应式(本地,IIFE 暴露 window.PetiteVue) -->
+<script src="vendor/petite-vue.iife.js"></script>
+<!-- 局域网桥接:非本机访问时把 pywebview 调用转发到 HTTP RPC(必须最先加载) -->
+<script src="js/bridge.js?v=20260915-2"></script>
+<!-- mock 数据 -->
+<script src="js/mock.js?v=20260915-2"></script>
+<!-- 公用工具(toListItem / DEFAULT_MODULES 等) -->
+<script src="js/utils.js?v=20260915-2"></script>
+<!-- 项目模块统一管理(顶部 tab 与仪表盘"测试项目"共享) -->
+<script src="js/modules.js?v=20260915-2"></script>
+<!-- 6 个页面组件 -->
+<script src="js/pages/dashboard.js?v=20260915-2"></script>
+<script src="js/pages/apicases.js?v=20260915-2"></script>
+<script src="js/pages/apidetail.js?v=20260915-2"></script>
+<script src="js/pages/testrun.js?v=20260915-2"></script>
+<script src="js/pages/reports.js?v=20260915-2"></script>
+<script src="js/pages/reportdetail.js?v=20260915-2"></script>
+<script src="js/pages/newcase.js?v=20260915-2"></script>
+<script src="js/pages/newsuite.js?v=20260915-2"></script>
+<!-- 本地存储适配(pywebview 真落盘,浏览器降级内存) -->
+<script src="js/storage.js?v=20260915-2"></script>
+<!-- 主应用入口(注册全部组件后启动) -->
+<script src="js/app.js?v=20260915-2"></script>
+
+</body>
+</html>

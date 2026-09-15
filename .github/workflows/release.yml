@@ -1,0 +1,327 @@
+name: Release
+
+# Pomelo 接口测试平台 —— Windows 出包流水线
+#
+# 版本号规则(与 08_adb_tool 的 release.yml 保持一致):
+#   每次 push  ->  取最新 v* tag 的 patch +1   (v1.0.0 -> v1.0.1 -> v1.0.2 ...)
+#   手动打 tag ->  直接用 tag 本身,之后从它继续 +1,不会版本回退
+#   版本号只由 version job 算一次,再传给 windows / publish,保证同一次运行内一致。
+#
+# 两种触发方式,产物都会自动挂到 Release(assets):
+#   A) 自动:push 到 master/main -> 出包 + 发「预发布」Release
+#      产物:PomeloTool_v1.0.1_win64.zip
+#   B) 正式:git tag v1.1.0 && git push origin v1.1.0 -> 发正式 Release
+#
+# 只有 Windows 一条腿:本项目是 pywebview(winforms) + Cython .pyd 打包,
+# 依赖 MSVC 与 cp312 ABI,mac/linux 不在支持范围内。
+#
+# ⚠ 本仓库当前托管在 Gitee(origin = gitee.com/carter919/pomelo_requests)。
+#   GitHub Actions 只在 GitHub 上执行 —— 要跑这份 workflow,需要把仓库镜像到
+#   GitHub,或在 Gitee Go 里按同样思路重写一份流水线。
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+    # 只改文档/工作流本身不发版,省 Windows runner 时长
+    # (要验证 workflow 改动,用下面的 workflow_dispatch 手动跑一次)
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 版本号是「读最新 tag +1」算出来的:两次 push 的构建若并发跑完,第二次会算出
+# 与第一次相同的版本,直接把上一个 Release 的 assets 覆盖掉。这里让新 push 取消
+# 还没跑完的旧运行 —— 旧运行不建 tag,所以不会断号,也不会同版本发两次。
+# group 带 ref:tag 触发与分支 push 不在同一队列,正式发版不会被打断。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_REF: master        # tag 触发时的构建源分支(push 触发用 github.sha)
+  PYTHON_VERSION: '3.12'   # 与本地 .pyd 的 cp312 ABI 对齐,别随手升
+  # CI 的 Windows runner stdout 默认 cp1252,pyd_pack.py / setup_pyd.py 里的中文
+  # print 会 UnicodeEncodeError,强制 utf-8(对其它平台无影响)
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: '1'
+  ALLURE_VER: '2.32.0'
+  # 便携运行时在本地是 C:\software\... 固定路径,runner 上不存在 ——
+  # 由下面的 Fetch 步骤下载解压到工作区,再用这两个变量告诉 pyd_pack.py 去哪取。
+  ALLURE_SRC: ${{ github.workspace }}\build_tools\allure-commandline
+  JRE_SRC: ${{ github.workspace }}\build_tools\jre
+  # 便携依赖缺失时必须硬失败:宁可不发版,也不发一个「点报告才炸」的包。
+  # 本地调试想强行出包时用 REQUIRE_BUNDLE=0,CI 上永远不要改。
+  REQUIRE_BUNDLE: '1'
+
+jobs:
+  # 版本号只在这里算一次,其余 job 复用它。若让 windows/publish 各自去读 tag,
+  # 期间一旦有新 tag 产生,两个 job 就会算出不同版本,产物名和 tag 会对不上。
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ver: ${{ steps.v.outputs.ver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0          # 需要完整 tag 列表
+
+      # 预检:CI 依赖的文件必须真的在仓库里。
+      # 本项目 .gitignore 有 *.spec / data/ 等通配规则,历史上就吃过"本地有、
+      # CI 上没有"的亏 —— 报错只有一句 "No such file or directory",排查很费劲。
+      # 这里直接指名道姓,并且不占用 Windows runner(在 ubuntu 上就失败)。
+      - name: Preflight（必需文件是否都在仓库里）
+        run: |
+          missing=""
+          for f in pomelo_tool.spec main.py setup_pyd.py pyd_pack.py \
+                   requirements.txt fix_and_check.bat \
+                   web/index.html web/js/bridge.js docs/images/icon.ico; do
+            [ -f "$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::以下文件在当前提交里不存在：$missing"
+            echo "通常是本地有、但被 .gitignore 排除（或忘了 git add）所以没进仓库。"
+            echo "排查：git check-ignore -v <文件>"
+            echo "修复：git add <文件>；若被忽略，先在 .gitignore 里加一行 !<文件>"
+            exit 1
+          fi
+          echo "必需文件就位：spec / 入口 / 打包脚本 / bridge.js / icon.ico"
+
+      - name: Resolve version（最新 tag 的 patch +1）
+        id: v
+        run: |
+          set -e
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VER="${{ github.ref_name }}"
+            VER="${VER#v}"
+          else
+            LAST="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+            if [ -z "$LAST" ]; then
+              VER="1.0.0"
+            else
+              BASE="${LAST#v}"
+              MAJ="${BASE%%.*}"
+              REST="${BASE#*.}"
+              MIN="${REST%%.*}"
+              PAT="${REST#*.}"
+              [ "$PAT" = "$REST" ] && PAT=0
+              VER="${MAJ}.${MIN}.$((PAT + 1))"
+            fi
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本：v$VER"
+          echo "### 本次版本 v$VER" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Show build source
+        shell: bash
+        run: |
+          echo "event    : ${{ github.event_name }}"
+          echo "ref      : ${{ github.ref_name }}"
+          echo "commit   : $(git rev-parse --short HEAD)"
+          echo "subject  : $(git log -1 --format=%s)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements.txt "cython>=3.0" "pyinstaller>=6.0" setuptools wheel
+
+      # 便携 Allure + JRE:发行包要「目标机不装 Java 也能看报告」,
+      # 所以这两样必须随包分发,不能像本地那样依赖 C:\software 下已有副本。
+      - name: Fetch portable Allure + JRE
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build_tools | Out-Null
+
+          $allureUrl = "https://github.com/allure-framework/allure2/releases/download/${{ env.ALLURE_VER }}/allure-${{ env.ALLURE_VER }}.zip"
+          Write-Host "下载 Allure: $allureUrl"
+          Invoke-WebRequest -Uri $allureUrl -OutFile build_tools\allure.zip
+          Expand-Archive -Path build_tools\allure.zip -DestinationPath build_tools\allure_raw -Force
+          # 官方 zip 解压后是一层 allure-<ver> 目录,pyd_pack.py 要的是里面那层
+          Move-Item "build_tools\allure_raw\allure-${{ env.ALLURE_VER }}" build_tools\allure-commandline
+          if (!(Test-Path "${{ env.ALLURE_SRC }}\bin\allure.bat")) {
+            throw "Allure 解压后结构不符合预期:找不到 bin\allure.bat"
+          }
+          Write-Host "[OK] Allure -> ${{ env.ALLURE_SRC }}"
+
+          $jreUrl = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse"
+          Write-Host "下载 JRE 17 (Adoptium): $jreUrl"
+          Invoke-WebRequest -Uri $jreUrl -OutFile build_tools\jre.zip
+          Expand-Archive -Path build_tools\jre.zip -DestinationPath build_tools\jre_raw -Force
+          $inner = Get-ChildItem build_tools\jre_raw -Directory | Select-Object -First 1
+          if (!$inner) { throw "JRE 解压后没有顶层目录" }
+          Move-Item $inner.FullName build_tools\jre
+          if (!(Test-Path "${{ env.JRE_SRC }}\bin\java.exe")) {
+            throw "JRE 解压后结构不符合预期:找不到 bin\java.exe"
+          }
+          Write-Host "[OK] JRE -> ${{ env.JRE_SRC }}"
+          & "${{ env.JRE_SRC }}\bin\java.exe" -version
+
+      # 依赖就绪复核:本地 build_pyd.bat 用的是同一条命令,单一事实来源。
+      # java -version 也在这里真跑一次 —— 只有文件不代表能启动。
+      - name: Check portable deps（与本地 build_pyd.bat 同一套校验）
+        run: python pyd_pack.py --check-deps
+
+      # Cython:把 pomelo_app.py 编译成 .pyd(发行包里不含业务源码)。
+      # setup_pyd.py 走 setuptools 的 build_ext,runner 自带 VS2022 C++ 工具链。
+      - name: Cython build（pomelo_app.py -> .pyd）
+        run: python setup_pyd.py build_ext --inplace
+
+      # pyd_pack.py 内部:临时把 .py 改名藏起来 -> PyInstaller 打包 -> 校验
+      # 无源码泄露 -> 还原 -> 拷 allure/jre 进 dist\PomeloTool\tools\
+      - name: PyInstaller pack（只打 .pyd + 捆绑 allure/jre）
+        run: python pyd_pack.py
+
+      - name: Assemble & verify layout
+        shell: pwsh
+        run: |
+          $dist = "dist\PomeloTool"
+          Copy-Item fix_and_check.bat "$dist\fix_and_check.bat" -Force
+
+          $errs = @()
+          if (!(Test-Path "$dist\PomeloTool.exe")) { $errs += "PomeloTool.exe" }
+          if (!(Test-Path "$dist\_internal\web\index.html")) { $errs += "web 资源" }
+          if (!(Test-Path "$dist\_internal\web\js\bridge.js")) { $errs += "bridge.js(局域网模式的桥)" }
+          if (!(Test-Path "$dist\_internal\web\js\pages\testrun.js")) { $errs += "页面组件" }
+          if (!(Test-Path "$dist\tools\allure-commandline\bin\allure.bat")) { $errs += "便携 allure-commandline" }
+          if (!(Test-Path "$dist\tools\jre\bin\java.exe")) { $errs += "便携 JRE" }
+          if (Test-Path "$dist\data") { $errs += "data\ 不该被打进包(应用运行时在 exe 旁自建)" }
+          if ($errs.Count) { throw ("布局校验失败：" + ($errs -join " / ")) }
+
+          # 源码泄露检查 + 核心 pyd 必须真的进包
+          $leak = @(Get-ChildItem "$dist\_internal" -Recurse -Filter "pomelo_app.py" -ErrorAction SilentlyContinue)
+          if ($leak.Count) { throw "源码泄露进包：$($leak[0].FullName)" }
+          $pyd = @(Get-ChildItem "$dist\_internal" -Recurse -Filter "pomelo_app.*.pyd")
+          if ($pyd.Count -lt 1) { throw "核心 pomelo_app.*.pyd 未打进包" }
+          Write-Host "[OK] 核心 pyd: $($pyd[0].Name)"
+          Write-Host "[OK] fix_and_check.bat 已随包分发"
+
+          # 便携依赖体积:tools 应约 152MB(28M allure + 125M jre),
+          # 数字明显偏小就说明拷贝被跳过或残缺,别等用户点报告才发现
+          $t = [math]::Round(((Get-ChildItem "$dist\tools" -Recurse -File |
+                Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "[OK] tools（便携 allure+jre）: $t MB"
+          if ($t -lt 100) { throw "tools 只有 $t MB,便携依赖不完整（正常约 152MB）" }
+
+          Get-ChildItem "$dist" | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Zip（文件名自带版本号）
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.version.outputs.ver }}"
+          $zip = "dist/PomeloTool_v${ver}_win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Write-Host "打包 $zip ..."
+          # ⚠ 不要用 Compress-Archive -Update:它会把整个 zip 替换成"本次新增的文件"
+          #   (踩过:92M 的包变成只有一个文件的 1M zip)。每次新建文件最稳。
+          Compress-Archive -Path "dist\PomeloTool" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "产物：$zip  ($mb MB)"
+          if ($mb -lt 50) { throw "zip 只有 $mb MB,明显不完整(含 JRE 时正常 90MB 上下)" }
+
+      - name: List dist
+        shell: bash
+        run: ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-win64
+          path: dist/PomeloTool_v*_win64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # 统一在最后一步建 Release + 挂 assets
+  publish:
+    needs: [version, windows]
+    # 即使 windows 失败也走进来:这样能明确看到是"构建失败"而不是"压根没触发"
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || env.BUILD_REF }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check downloaded assets
+        run: |
+          echo "下载到的产物："
+          ls -lh dist || true
+          N=$(ls -1 dist/*.zip 2>/dev/null | wc -l)
+          [ "$N" -gt 0 ] || { echo "::error::没有任何产物（构建失败），不建 Release"; exit 1; }
+
+      - name: Compute tag / title
+        id: meta
+        run: |
+          VER="${{ needs.version.outputs.ver }}"
+          [ -n "$VER" ] || VER="0.0.0"
+          TAG="v${VER}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then PRE=false; else PRE=true; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "title=Pomelo 接口测试平台 v${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG prerelease=$PRE"
+          {
+            echo "## 产物"
+            echo ""
+            for f in dist/*.zip; do
+              [ -f "$f" ] || continue
+              echo "- \`$(basename "$f")\`  ($(du -h "$f" | cut -f1))"
+            done
+            echo ""
+            echo "构建提交：\`$(git rev-parse --short HEAD)\` $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            Pomelo 接口测试平台 —— 桌面端接口测试工具，解压即用。
+
+            - 🖥 仪表盘：用例/套件统计、执行趋势、通过率、最近执行记录
+            - 📋 接口用例：按模块管理，HTTP 与 Socket 协议，断言 + 变量传递
+            - ▶️ 测试执行：套件执行、失败重试、超时配置、终端风格实时日志
+            - 📊 测试报告：内置 Allure（含精简 JRE，**目标机无需装 Java**）
+            - 🌐 局域网协作：一台机器启动，同网段其他人用浏览器即可访问使用
+            - 🔌 端口自动回退：18080 被占用时自动改用 18081，页面右上角显示访问地址
+
+            ### 使用
+
+            1. 解压 `PomeloTool_v*_win64.zip`
+            2. **先双击 `fix_and_check.bat`**（解除下载文件的安全标记 + 检查 .NET 版本，需 4.7.2+）
+            3. 双击 `PomeloTool.exe`
+
+            > 局域网访问：首次使用需管理员放行防火墙（启动时控制台会打印对应命令）。
+            > 数据在 exe 旁的 `data/` 目录，升级程序不影响数据。
+
+            > 用 7-Zip 解压可跳过第 2 步（Windows 自带解压会传播「Web 标记」）。
+          files: dist/*.zip

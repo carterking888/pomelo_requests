@@ -1,0 +1,9 @@
+# PyWebView 桌面应用容器
+# 注意:包名是 pywebview,不是 webview(webview 是另一个无关的废弃包,只有 0.1.x 版本)
+# 实装版本 6.2.1(modules.js 的 Promise 桥兼容性按 6.x 验证),约束必须对齐,
+# 写成 <6.0 会导致每次 build 都卸载降级,还容易撞上卸载锁/残骸报 no RECORD
+pywebview>=6.0,<7.0
+# Windows 下 pywebview 依赖 pythonnet,pip 会自动安装
+
+# 套件执行引擎 —— socket 用例的 WebSocket 长连接客户端
+websocket-client>=1.6,<2.0

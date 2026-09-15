@@ -1,0 +1,24 @@
+.idea/
+.vscode/
+.workbuddy/
+__pycache__/
+*.egg-info/
+venv/
+.venv/
+build/
+dist/
+data/
+*.py[cod]
+
+# Cython 中间产物(setup_pyd.py 生成):源码与编译产物都不入仓库
+pomelo_app.c
+pomelo_app.*.pyd
+
+# PyInstaller spec:全局忽略,但打包用的那份必须进仓库
+# (CI 上没有它就出不了包,而 .gitignore 命中时的报错只有一句 "not found",很费劲)
+*.spec
+!pomelo_tool.spec
+
+# CSDN 投稿稿:仅本机使用,不入仓库
+README_CSDN.html
+README_CSDN.md
