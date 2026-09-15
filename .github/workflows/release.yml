@@ -264,6 +264,14 @@ jobs:
   # 这也是本地 Windows 开发机打不出 mac 包的原因。
   # 矩阵里任一条腿失败不互相牵连(fail-fast: false),publish 用 !cancelled()
   # 兜底 —— 至少把成功的那份发出去。
+  #
+  # ⚠ runner 标签必须用「还活着」的:
+  #   macos-13(Intel)已于 2025-12-04 被 GitHub 完全退役。标签一旦失效,
+  #   job 不会报错,而是永远停在 "Waiting for a runner to pick up this job..."
+  #   (空等到 24h 才超时),白白浪费一次流水线,还会把 publish 卡住。
+  #   Intel 的官方替代是 macos-15-intel —— 标准 runner(公开仓库免费),
+  #   支持到 2027 年 8 月,之后 GitHub 不再提供任何 x86_64 macOS 镜像。
+  #   想临时停掉 Intel 产物:把下面那条 include 注释掉即可,publish 不受影响。
   # ---------------------------------------------------------------
   macos:
     needs: version
@@ -271,9 +279,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14      # Apple Silicon (arm64)
+          - runner: macos-14        # Apple Silicon (arm64)
             arch: arm64
-          - runner: macos-13      # Intel (x86_64);若该镜像退役改 macos-15-intel
+          - runner: macos-15-intel  # Intel (x86_64);macos-13 已退役,勿回退
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90

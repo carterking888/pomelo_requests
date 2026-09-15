@@ -20,6 +20,7 @@
 import ast
 import importlib.util
 import os
+import re
 import shutil
 import sys
 import types
@@ -454,6 +455,70 @@ def check_runtime_tools_path():
               got == want, dirs)
 
 
+# ============================================================
+#  6. CI runner 标签
+# ============================================================
+# 为什么值得单独盯着:runner 标签失效时 GitHub **不报错**,job 只是永远停在
+# "Waiting for a runner to pick up this job...",空等到 24h 才超时。
+# 表现和「排队慢」一模一样,极易误判成 runner 紧张 —— 实际是标签早没了。
+# macos-13 就是这么没的(2025-12-04 完全退役),白等过一次流水线。
+#
+# 这里只做纯文本扫描,不 import yaml:本脚本是在 version job 里跑的,
+# 那个 job 还没有 pip install,拿不到 PyYAML。
+ALIVE_MACOS = {
+    "macos-14", "macos-15", "macos-26", "macos-latest",
+    "macos-15-intel",                                    # Intel 官方替代
+    "macos-14-large", "macos-15-large", "macos-latest-large",
+}
+RETIRED_MACOS = {
+    "macos-13", "macos-13-large", "macos-13-xlarge",     # 2025-12-04 退役
+    "macos-12", "macos-12-large", "macos-11",
+}
+# 这些标签跑的是 x86_64;其余 mac 标签都是 arm64
+INTEL_MACOS = {"macos-15-intel", "macos-14-large",
+               "macos-15-large", "macos-latest-large"}
+
+
+def check_workflow_runners():
+    print("\n[6] .github/workflows/release.yml 的 runner 标签")
+    p = os.path.join(ROOT, ".github", "workflows", "release.yml")
+    if not os.path.isfile(p):
+        check("release.yml 存在", False, p)
+        return
+    check("release.yml 存在", True)
+    s = open(p, encoding="utf-8").read()
+
+    # 注释行不算:`# runner: macos-13` 这种说明文字不能被当成配置
+    body = "\n".join(l for l in s.splitlines() if not l.lstrip().startswith("#"))
+    labels = set(re.findall(r"^\s*(?:-\s*)?runner:\s*([^\s#]+)", body, re.M))
+    labels |= set(re.findall(r"^\s*runs-on:\s*([^\s#]+)", body, re.M))
+    macos = {l for l in labels if l.startswith("macos")}
+
+    check("矩阵里没有已退役的 mac runner 标签",
+          not (macos & RETIRED_MACOS), sorted(macos & RETIRED_MACOS))
+    unknown = macos - ALIVE_MACOS
+    check("mac runner 标签都在可用列表内(新标签要先确认还活着)",
+          not unknown,
+          "未登记:%s —— 确认该镜像仍受支持后再加进 ALIVE_MACOS"
+          % sorted(unknown))
+
+    # runner 与 arch 必须配套:把 x86_64 挂在 arm64 镜像上,编出来的
+    # 架构是错的,而且要等打包完才在用户机器上暴露
+    pairs = re.findall(r"-\s*runner:\s*([^\s#]+)[^\n]*\n\s*arch:\s*([^\s#]+)",
+                       body)
+    check("能解析出 runner/arch 配对", bool(pairs), pairs)
+    for runner, arch in pairs:
+        want = "x86_64" if runner in INTEL_MACOS else "arm64"
+        check("%s 对应 %s" % (runner, want), arch == want,
+              "实际写的是 " + arch)
+
+    archs = {a for _, a in pairs}
+    check("有 arm64 产物腿", "arm64" in archs, sorted(archs))
+    if "x86_64" not in archs:
+        # 不留 Intel 腿是允许的(把 include 注释掉即可),只提示不判失败
+        print("  INFO  matrix 里没有 x86_64 —— Intel 产物本次不会产出")
+
+
 def main():
     print("=" * 66)
     print("macOS 分支 dry-run 预检(在 Windows 上模拟 darwin)")
@@ -466,6 +531,7 @@ def main():
     check_setup_clang_env()
     check_build_script()
     check_runtime_tools_path()
+    check_workflow_runners()
 
     print("\n" + "=" * 66)
     if FAILS:
